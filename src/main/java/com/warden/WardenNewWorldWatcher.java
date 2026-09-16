@@ -24,6 +24,8 @@ import java.nio.file.Path;
 public final class WardenNewWorldWatcher {
 
     private static final double LOCKDOWN_BORDER_SIZE = 50.0;
+    // vanilla's default border; the lockdown only ever runs on a brand new world
+    static final double VANILLA_BORDER_SIZE = 5.9999968E7;
 
     private static boolean freshOverworld;
     private static boolean noticeSent;
@@ -95,7 +97,9 @@ public final class WardenNewWorldWatcher {
         try (var files = Files.list(dir)) {
             return files.findAny().isEmpty();
         } catch (IOException e) {
-            return true;
+            // can't tell, so don't lock down a world that is probably established
+            WardenMod.LOGGER.warn("[Warden] could not inspect {}: {}", dir, e.getMessage());
+            return false;
         }
     }
 }

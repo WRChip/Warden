@@ -10,6 +10,7 @@ import java.io.Reader;
 import java.io.Writer;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 
 /** Settings that only matter on this client. Everything else lives in the server config. */
 public class WardenClientConfig {
@@ -33,8 +34,12 @@ public class WardenClientConfig {
     }
 
     public void save() {
-        try (Writer writer = Files.newBufferedWriter(PATH)) {
-            GSON.toJson(this, writer);
+        Path tmp = PATH.resolveSibling(PATH.getFileName() + ".tmp");
+        try {
+            try (Writer writer = Files.newBufferedWriter(tmp)) {
+                GSON.toJson(this, writer);
+            }
+            Files.move(tmp, PATH, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
         } catch (IOException e) {
             WardenMod.LOGGER.error("[Warden] Failed to save client config: {}", e.getMessage());
         }

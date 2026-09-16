@@ -12,7 +12,7 @@ public record WeaponLimitsSyncPayload(String json) implements CustomPayload {
             new CustomPayload.Id<>(Identifier.of("warden", "weapon_limits_sync"));
 
     public static final PacketCodec<RegistryByteBuf, WeaponLimitsSyncPayload> CODEC =
-            PacketCodec.tuple(PacketCodecs.STRING, WeaponLimitsSyncPayload::json, WeaponLimitsSyncPayload::new);
+            PacketCodec.tuple(PacketCodecs.string(1 << 20), WeaponLimitsSyncPayload::json, WeaponLimitsSyncPayload::new);
 
     @Override
     public Id<? extends CustomPayload> getId() {

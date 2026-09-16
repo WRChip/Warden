@@ -43,8 +43,10 @@ public abstract class CraftingResultSlotMixin {
         int currentCount = WardenMod.countItemsInInventory(inv, itemId);
 
         if (currentCount + result.getCount() > limit) {
-            WardenMod.sendNotice((net.minecraft.server.network.ServerPlayerEntity) player, WardenMod.NoticeCategory.ITEM,
-                    "can't craft " + WardenMod.shortId(itemId) + " - at limit (" + limit + ")");
+            if (player instanceof net.minecraft.server.network.ServerPlayerEntity serverPlayer) {
+                WardenMod.sendNotice(serverPlayer, WardenMod.NoticeCategory.ITEM,
+                        "can't craft " + WardenMod.shortId(itemId) + " - at limit (" + limit + ")");
+            }
             cir.setReturnValue(false);
         }
     }

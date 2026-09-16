@@ -60,11 +60,11 @@ public abstract class LivingEntityMixin {
         }
 
         if (newAmplifier != amplifier || newDuration != duration) {
-            cir.setReturnValue(false);
             APPLYING.set(true);
             try {
-                player.addStatusEffect(new StatusEffectInstance(effectType, newDuration, newAmplifier,
-                        effect.isAmbient(), effect.shouldShowParticles(), effect.shouldShowIcon()), source);
+                // callers like /effect count this as a success, so return what the capped apply returned
+                cir.setReturnValue(player.addStatusEffect(new StatusEffectInstance(effectType, newDuration, newAmplifier,
+                        effect.isAmbient(), effect.shouldShowParticles(), effect.shouldShowIcon()), source));
                 WardenMod.sendNotice(player, WardenMod.NoticeCategory.EFFECT,
                         WardenMod.shortId(effectId) + " capped");
             } finally {

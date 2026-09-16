@@ -19,123 +19,75 @@ import org.jetbrains.annotations.Nullable;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
+import org.spongepowered.asm.mixin.injection.ModifyVariable;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 /**
- * Intercepts World#createExplosion at HEAD, caps the power based on entity/source type.
+ * Caps World#createExplosion power based on entity/source type.
  *
  * BedBlock and RespawnAnchorBlock both call the Vec3d overload (not the DDD overload),
- * so we inject into BOTH overloads. A ThreadLocal re-entry guard prevents recursion.
+ * so both overloads are hooked.
  *
  * Distinguishing bed vs respawn_anchor: BedBlock passes null for ExplosionBehavior;
  * RespawnAnchorBlock passes a non-null ExplosionBehavior instance. Both use the
  * BAD_RESPAWN_POINT damage type, so the behavior-null check is the reliable tell.
  *
- * If capped power > 0: re-invokes with the capped value and cancels the original.
- * If capped power <= 0: cancels the explosion entirely.
+ * The power argument is rewritten in place rather than re-invoking the method under a
+ * re-entry guard: end crystals and tnt minecarts detonate synchronously inside the blast
+ * that hits them, and a guard held for the whole call let those chained explosions through
+ * at full power. If the cap is 0 the explosion is cancelled outright.
  */
 @Mixin(World.class)
 public abstract class ExplosionMixin {
 
-    private static final ThreadLocal<Boolean> APPLYING = ThreadLocal.withInitial(() -> false);
+    private static final String DDD = "createExplosion(Lnet/minecraft/entity/Entity;Lnet/minecraft/entity/damage/DamageSource;Lnet/minecraft/world/explosion/ExplosionBehavior;DDDFZLnet/minecraft/world/World$ExplosionSourceType;)V";
+    private static final String VEC = "createExplosion(Lnet/minecraft/entity/Entity;Lnet/minecraft/entity/damage/DamageSource;Lnet/minecraft/world/explosion/ExplosionBehavior;Lnet/minecraft/util/math/Vec3d;FZLnet/minecraft/world/World$ExplosionSourceType;)V";
 
-    // -------------------------------------------------------------------------
-    // DDD overload — used by entity-based explosions (TNT, creeper, etc.)
-    // -------------------------------------------------------------------------
-
-    @Inject(
-        method = "createExplosion(Lnet/minecraft/entity/Entity;Lnet/minecraft/entity/damage/DamageSource;Lnet/minecraft/world/explosion/ExplosionBehavior;DDDFZLnet/minecraft/world/World$ExplosionSourceType;)V",
-        at = @At("HEAD"),
-        cancellable = true
-    )
-    private void limitExplosionDDD(
-        @Nullable Entity entity,
-        @Nullable DamageSource source,
-        @Nullable ExplosionBehavior behavior,
-        double x, double y, double z,
-        float power,
-        boolean createFire,
-        World.ExplosionSourceType sourceType,
-        CallbackInfo ci
-    ) {
-        if (APPLYING.get()) return;
-        if (!WardenMod.CONFIG.explosionLimitsEnabled) return;
-
-        String sourceKey = resolveSourceKey(entity, source, behavior, sourceType);
-        if (sourceKey == null) return;
-
-        WardenConfig.ExplosionSourceConfig srcCfg = WardenMod.CONFIG.explosionSources.get(sourceKey);
-        if (srcCfg == null || !srcCfg.enabled) return;
-
-        float capped = Math.min(power, srcCfg.maxPower);
-        if (capped >= power) return;
-
-        WardenMod.LOGGER.debug("[Warden] {} explosion capped: {} -> {}", sourceKey, power, capped);
-
-        if (capped <= 0f) {
-            ci.cancel();
-            return;
-        }
-
-        World world = (World)(Object)this;
-        APPLYING.set(true);
-        try {
-            world.createExplosion(entity, source, behavior, x, y, z, capped, createFire, sourceType);
-            ci.cancel();
-        } finally {
-            APPLYING.set(false);
-        }
+    @Inject(method = DDD, at = @At("HEAD"), cancellable = true)
+    private void warden$cancelExplosionDDD(@Nullable Entity entity, @Nullable DamageSource source, @Nullable ExplosionBehavior behavior,
+                                           double x, double y, double z, float power, boolean createFire,
+                                           World.ExplosionSourceType sourceType, CallbackInfo ci) {
+        if (cappedPower(entity, source, behavior, sourceType, power) <= 0f) ci.cancel();
     }
 
-    // -------------------------------------------------------------------------
-    // Vec3d overload — used by BedBlock and RespawnAnchorBlock
-    // -------------------------------------------------------------------------
-
-    @Inject(
-        method = "createExplosion(Lnet/minecraft/entity/Entity;Lnet/minecraft/entity/damage/DamageSource;Lnet/minecraft/world/explosion/ExplosionBehavior;Lnet/minecraft/util/math/Vec3d;FZLnet/minecraft/world/World$ExplosionSourceType;)V",
-        at = @At("HEAD"),
-        cancellable = true
-    )
-    private void limitExplosionVec3d(
-        @Nullable Entity entity,
-        @Nullable DamageSource source,
-        @Nullable ExplosionBehavior behavior,
-        Vec3d pos,
-        float power,
-        boolean createFire,
-        World.ExplosionSourceType sourceType,
-        CallbackInfo ci
-    ) {
-        if (APPLYING.get()) return;
-        if (!WardenMod.CONFIG.explosionLimitsEnabled) return;
-
-        String sourceKey = resolveSourceKey(entity, source, behavior, sourceType);
-        if (sourceKey == null) return;
-
-        WardenConfig.ExplosionSourceConfig srcCfg = WardenMod.CONFIG.explosionSources.get(sourceKey);
-        if (srcCfg == null || !srcCfg.enabled) return;
-
-        float capped = Math.min(power, srcCfg.maxPower);
-        if (capped >= power) return;
-
-        WardenMod.LOGGER.debug("[Warden] {} explosion capped: {} -> {}", sourceKey, power, capped);
-
-        if (capped <= 0f) {
-            ci.cancel();
-            return;
-        }
-
-        World world = (World)(Object)this;
-        APPLYING.set(true);
-        try {
-            world.createExplosion(entity, source, behavior, pos, capped, createFire, sourceType);
-            ci.cancel();
-        } finally {
-            APPLYING.set(false);
-        }
+    @ModifyVariable(method = DDD, at = @At("HEAD"), argsOnly = true)
+    private float warden$capExplosionDDD(float power, @Nullable Entity entity, @Nullable DamageSource source, @Nullable ExplosionBehavior behavior,
+                                         double x, double y, double z, float original, boolean createFire,
+                                         World.ExplosionSourceType sourceType) {
+        return cappedPower(entity, source, behavior, sourceType, power);
     }
 
-    // -------------------------------------------------------------------------
+    @Inject(method = VEC, at = @At("HEAD"), cancellable = true)
+    private void warden$cancelExplosionVec3d(@Nullable Entity entity, @Nullable DamageSource source, @Nullable ExplosionBehavior behavior,
+                                             Vec3d pos, float power, boolean createFire,
+                                             World.ExplosionSourceType sourceType, CallbackInfo ci) {
+        if (cappedPower(entity, source, behavior, sourceType, power) <= 0f) ci.cancel();
+    }
+
+    @ModifyVariable(method = VEC, at = @At("HEAD"), argsOnly = true)
+    private float warden$capExplosionVec3d(float power, @Nullable Entity entity, @Nullable DamageSource source, @Nullable ExplosionBehavior behavior,
+                                           Vec3d pos, float original, boolean createFire,
+                                           World.ExplosionSourceType sourceType) {
+        return cappedPower(entity, source, behavior, sourceType, power);
+    }
+
+    /** The configured cap for this explosion, or {@code power} unchanged when none applies. */
+    private static float cappedPower(@Nullable Entity entity, @Nullable DamageSource source, @Nullable ExplosionBehavior behavior,
+                                     World.ExplosionSourceType sourceType, float power) {
+        if (!WardenMod.CONFIG.explosionLimitsEnabled) return power;
+
+        String sourceKey = resolveSourceKey(entity, source, behavior, sourceType);
+        if (sourceKey == null) return power;
+
+        WardenConfig.ExplosionSourceConfig srcCfg = WardenMod.CONFIG.explosionSources.get(sourceKey);
+        if (srcCfg == null || !srcCfg.enabled) return power;
+
+        float capped = Math.min(power, srcCfg.maxPower);
+        if (capped < power) {
+            WardenMod.LOGGER.debug("[Warden] {} explosion capped: {} -> {}", sourceKey, power, capped);
+        }
+        return capped;
+    }
 
     private static @Nullable String resolveSourceKey(
             @Nullable Entity entity,

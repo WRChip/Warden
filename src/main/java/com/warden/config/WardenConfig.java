@@ -18,6 +18,7 @@ import java.io.Reader;
 import java.io.Writer;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.LinkedHashMap;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
@@ -150,6 +151,14 @@ public class WardenConfig {
             LOGGER.info("[Warden] Loaded config from {}", CONFIG_PATH);
         } catch (Exception e) {
             LOGGER.error("[Warden] Failed to read config, using defaults: {}", e.getMessage());
+            // keep the broken file around so a truncated write can't silently wipe every rule
+            Path broken = CONFIG_PATH.resolveSibling("warden.json.broken");
+            try {
+                Files.copy(CONFIG_PATH, broken, StandardCopyOption.REPLACE_EXISTING);
+                LOGGER.error("[Warden] unreadable config copied to {}", broken);
+            } catch (IOException copyError) {
+                LOGGER.error("[Warden] could not back up the unreadable config: {}", copyError.getMessage());
+            }
             config.populateDefaults();
         }
         return config;
@@ -157,8 +166,13 @@ public class WardenConfig {
 
     public void save() {
         normalize();
-        try (Writer writer = Files.newBufferedWriter(CONFIG_PATH)) {
-            GSON.toJson(toJson(), writer);
+        // write beside the file and swap it in, so a crash mid-write can't leave a truncated config
+        Path tmp = CONFIG_PATH.resolveSibling("warden.json.tmp");
+        try {
+            try (Writer writer = Files.newBufferedWriter(tmp)) {
+                GSON.toJson(toJson(), writer);
+            }
+            Files.move(tmp, CONFIG_PATH, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
         } catch (IOException e) {
             LOGGER.error("[Warden] Failed to save config: {}", e.getMessage());
         }
@@ -203,6 +217,7 @@ public class WardenConfig {
             case "enchant" -> {
                 enchantmentLimitsEnabled = true;
                 enchantmentLimits.clear();
+                itemEnchantmentOverrides.clear();
             }
             case "effect" -> {
                 effectLimitsEnabled = true;
@@ -267,6 +282,7 @@ public class WardenConfig {
 
         enchantmentLimitsEnabled = true;
         enchantmentLimits.clear();
+        itemEnchantmentOverrides.clear();
         effectLimitsEnabled = true;
         effectLimits.clear();
         itemActionBarEnabled = true;
@@ -317,7 +333,8 @@ public class WardenConfig {
             if (items.has("items")) {
                 JsonObject itemMap = items.getAsJsonObject("items");
                 for (Map.Entry<String, JsonElement> entry : itemMap.entrySet()) {
-                    itemLimits.put(entry.getKey(), entry.getValue().getAsInt());
+                    String id = canonicalId(entry.getKey(), "item_limits");
+                    if (id != null) itemLimits.put(id, entry.getValue().getAsInt());
                 }
             }
         }
@@ -359,8 +376,9 @@ public class WardenConfig {
                     if (itemCfg.has("recharge_ticks")) {
                         cfg.rechargeTicks = itemCfg.get("recharge_ticks").getAsInt();
                     }
-                    if (cfg.isConfigured()) {
-                        weaponLimits.put(entry.getKey(), cfg);
+                    String id = canonicalId(entry.getKey(), "weapon_limits");
+                    if (id != null && cfg.isConfigured()) {
+                        weaponLimits.put(id, cfg);
                     }
                 }
             }
@@ -372,7 +390,8 @@ public class WardenConfig {
             if (enchl.has("enchantments")) {
                 JsonObject enchMap = enchl.getAsJsonObject("enchantments");
                 for (Map.Entry<String, JsonElement> entry : enchMap.entrySet()) {
-                    enchantmentLimits.put(entry.getKey(), entry.getValue().getAsInt());
+                    String id = canonicalId(entry.getKey(), "enchantment_limits");
+                    if (id != null) enchantmentLimits.put(id, entry.getValue().getAsInt());
                 }
             }
             if (enchl.has("item_overrides")) {
@@ -381,9 +400,11 @@ public class WardenConfig {
                     Map<String, Integer> itemMap = new LinkedHashMap<>();
                     JsonObject itemEnchants = itemEntry.getValue().getAsJsonObject();
                     for (Map.Entry<String, JsonElement> enchEntry : itemEnchants.entrySet()) {
-                        itemMap.put(enchEntry.getKey(), enchEntry.getValue().getAsInt());
+                        String enchId = canonicalId(enchEntry.getKey(), "item_overrides");
+                        if (enchId != null) itemMap.put(enchId, enchEntry.getValue().getAsInt());
                     }
-                    itemEnchantmentOverrides.put(itemEntry.getKey(), itemMap);
+                    String itemId = canonicalId(itemEntry.getKey(), "item_overrides");
+                    if (itemId != null) itemEnchantmentOverrides.put(itemId, itemMap);
                 }
             }
         }
@@ -397,7 +418,8 @@ public class WardenConfig {
                     JsonObject eff = entry.getValue().getAsJsonObject();
                     int maxLevel = eff.has("max_level") ? eff.get("max_level").getAsInt() : -1;
                     int maxDuration = eff.has("max_duration") ? eff.get("max_duration").getAsInt() : -1;
-                    effectLimits.put(entry.getKey(), new EffectLimitConfig(maxLevel, maxDuration));
+                    String id = canonicalId(entry.getKey(), "effect_limits");
+                    if (id != null) effectLimits.put(id, new EffectLimitConfig(maxLevel, maxDuration));
                 }
             }
         }
@@ -417,7 +439,8 @@ public class WardenConfig {
                     Map<String, Integer> sourceMap = new LinkedHashMap<>();
                     JsonObject identifiers = sourceEntry.getValue().getAsJsonObject();
                     for (Map.Entry<String, JsonElement> idEntry : identifiers.entrySet()) {
-                        sourceMap.put(idEntry.getKey(), idEntry.getValue().getAsInt());
+                        String id = canonicalId(idEntry.getKey(), "xp_limits.overrides");
+                        if (id != null) sourceMap.put(id, idEntry.getValue().getAsInt());
                     }
                     xpOverrides.put(sourceEntry.getKey(), sourceMap);
                 }
@@ -688,6 +711,16 @@ public class WardenConfig {
             return false;
         });
         blockedDimensionKeys = keys.isEmpty() ? Set.of() : Set.copyOf(keys);
+    }
+
+    // "diamond" and "minecraft:diamond" have to land on one key or only one of them is enforced
+    private static String canonicalId(String key, String section) {
+        Identifier id = Identifier.tryParse(key.trim());
+        if (id == null) {
+            LOGGER.warn("[Warden] ignoring invalid id in {}: {}", section, key);
+            return null;
+        }
+        return id.toString();
     }
 
     private static boolean getBool(JsonObject obj, String key, boolean def) {

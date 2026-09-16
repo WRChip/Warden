@@ -92,7 +92,8 @@ public class WardenMod implements ModInitializer {
 
     /** Returns true once the player has gone over the limit for the current window. */
     public static boolean registerBucketDrain(ServerPlayerEntity player) {
-        int now = player.age;
+        // server ticks, not player.age: age restarts at 0 on death and relog
+        int now = player.getEntityWorld().getServer().getTicks();
         UUID id = player.getUuid();
         DrainWindow window = BUCKET_DRAINS.compute(id, (k, prev) -> {
             if (prev == null || now - prev.startTick() > CONFIG.bucketDrainWindowTicks) {
@@ -139,10 +140,13 @@ public class WardenMod implements ModInitializer {
         ServerPlayConnectionEvents.DISCONNECT.register((handler, server) -> {
             LAST_PICKUP_NOTICE.remove(handler.player.getUuid());
             LAST_NOTICE.remove(handler.player.getUuid());
+            BUCKET_DRAINS.remove(handler.player.getUuid());
         });
         ServerLifecycleEvents.SERVER_STOPPED.register(server -> {
             LAST_PICKUP_NOTICE.clear();
             LAST_NOTICE.clear();
+            BUCKET_DRAINS.clear();
+            LAST_OVERSIZE_LOG.clear();
         });
         ServerTickEvents.END_SERVER_TICK.register((MinecraftServer server) -> {
             if (server.getTicks() % Math.max(1, CONFIG.checkIntervalTicks) != 0) {
@@ -185,7 +189,7 @@ public class WardenMod implements ModInitializer {
             case WEAPON -> CONFIG.weaponActionBarEnabled;
             case ENCHANTMENT -> CONFIG.enchantmentActionBarEnabled;
             case EFFECT -> CONFIG.effectActionBarEnabled;
-            case XP -> true;
+            case XP -> CONFIG.xpActionBarEnabled;
             case DIMENSION -> true;
             case BUCKET -> true;
         };
@@ -197,10 +201,11 @@ public class WardenMod implements ModInitializer {
         }
         // beacons and auras re-apply every few seconds; don't repeat the same line
         LastNotice last = LAST_NOTICE.get(player.getUuid());
-        if (last != null && last.message.equals(message) && player.age - last.tick < 100) {
+        int now = player.getEntityWorld().getServer().getTicks();
+        if (last != null && last.message.equals(message) && now - last.tick < 100) {
             return;
         }
-        LAST_NOTICE.put(player.getUuid(), new LastNotice(message, player.age));
+        LAST_NOTICE.put(player.getUuid(), new LastNotice(message, now));
         player.sendMessage(wardenPrefix().append(Text.literal(message).formatted(Formatting.RED)), true);
     }
 
@@ -334,8 +339,9 @@ public class WardenMod implements ModInitializer {
         // banned items (limit 0) are purged anywhere the player can reach them, not just the hotbar/inventory
         purgeBanned(player, player.getEnderChestInventory(), "ender chest");
 
+        // the player's own screen counts too: its cursor and 2x2 grid aren't part of the inventory
         ScreenHandler handler = player.currentScreenHandler;
-        if (handler != null && handler != player.playerScreenHandler) {
+        if (handler != null) {
             boolean changed = false;
             for (Slot slot : handler.slots) {
                 if (slot.inventory == inv) continue;
@@ -365,7 +371,7 @@ public class WardenMod implements ModInitializer {
         try {
             ItemStack.OPTIONAL_PACKET_CODEC.encode(buf, stack);
             return buf.readableBytes();
-        } catch (RuntimeException e) {
+        } catch (RuntimeException | StackOverflowError e) {
             // couldn't even encode it; it would kill the client's decoder too
             return Integer.MAX_VALUE;
         } finally {
@@ -383,6 +389,9 @@ public class WardenMod implements ModInitializer {
         Long last = LAST_OVERSIZE_LOG.get(key);
         if (last != null && now - last < 10_000) {
             return;
+        }
+        if (LAST_OVERSIZE_LOG.size() > 1000) {
+            LAST_OVERSIZE_LOG.values().removeIf(t -> now - t > 60_000);
         }
         LAST_OVERSIZE_LOG.put(key, now);
         LOGGER.warn("[Warden] chunk-ban guard: {}", message);
@@ -418,7 +427,7 @@ public class WardenMod implements ModInitializer {
             }
         }
         ScreenHandler handler = player.currentScreenHandler;
-        if (handler != null && handler != player.playerScreenHandler) {
+        if (handler != null) {
             boolean changed = purgeOversized(handler, name);
             ItemStack cursor = handler.getCursorStack();
             if (isOversized(cursor)) {
@@ -453,9 +462,10 @@ public class WardenMod implements ModInitializer {
     }
 
     public static void sendPickupBlockedNotice(ServerPlayerEntity player, String itemId, int limit) {
+        int now = player.getEntityWorld().getServer().getTicks();
         Integer last = LAST_PICKUP_NOTICE.get(player.getUuid());
-        if (last != null && player.age - last < 40) return;
-        LAST_PICKUP_NOTICE.put(player.getUuid(), player.age);
+        if (last != null && now - last < 40) return;
+        LAST_PICKUP_NOTICE.put(player.getUuid(), now);
         sendNotice(player, NoticeCategory.ITEM, limit == 0
                 ? shortId(itemId) + " is banned"
                 : "can't pick up " + shortId(itemId) + " - at limit (" + limit + ")");
@@ -709,7 +719,7 @@ public class WardenMod implements ModInitializer {
             changed |= applyWeaponReachLimit(stack, defaults, limit != null ? limit.reach : null, apply);
             return changed;
         } finally {
-            ENFORCING_WEAPON_COMPONENTS.set(false);
+            ENFORCING_WEAPON_COMPONENTS.remove();
         }
     }
 
@@ -727,7 +737,8 @@ public class WardenMod implements ModInitializer {
                     || entry.attribute().equals(EntityAttributes.ATTACK_SPEED);
             boolean baseId = entry.modifier().idMatches(Item.BASE_ATTACK_DAMAGE_MODIFIER_ID)
                     || entry.modifier().idMatches(Item.BASE_ATTACK_SPEED_MODIFIER_ID);
-            if (attackAttr && !baseId) {
+            // a base-id modifier parked in another slot would dodge the mainhand-only cap below
+            if (attackAttr && (!baseId || entry.slot() != AttributeModifierSlot.MAINHAND)) {
                 if (!apply) return true;
                 if (kept == null) kept = new ArrayList<>(current.modifiers().subList(0, i));
                 continue;
@@ -1045,8 +1056,11 @@ public class WardenMod implements ModInitializer {
         CLIENT_SYNCED_WEAPON_LIMITS_VALID = false;
         CLIENT_SYNCED_WEAPON_LIMITS_ENABLED = true;
 
+        Map<String, WardenConfig.WeaponLimitConfig> parsed = new HashMap<>();
+        boolean enabled;
+        try {
         JsonObject root = JsonParser.parseString(json).getAsJsonObject();
-        CLIENT_SYNCED_WEAPON_LIMITS_ENABLED = !root.has("enabled") || root.get("enabled").getAsBoolean();
+        enabled = !root.has("enabled") || root.get("enabled").getAsBoolean();
         if (root.has("items")) {
             JsonObject items = root.getAsJsonObject("items");
             for (Map.Entry<String, JsonElement> entry : items.entrySet()) {
@@ -1062,10 +1076,16 @@ public class WardenMod implements ModInitializer {
                     cfg.rechargeTicks = itemCfg.get("recharge_ticks").getAsInt();
                 }
                 if (cfg.isConfigured()) {
-                    CLIENT_SYNCED_WEAPON_LIMITS.put(entry.getKey(), cfg);
+                    parsed.put(entry.getKey(), cfg);
                 }
             }
         }
+        } catch (RuntimeException e) {
+            LOGGER.warn("[Warden] ignoring malformed weapon limit sync: {}", e.getMessage());
+            return;
+        }
+        CLIENT_SYNCED_WEAPON_LIMITS.putAll(parsed);
+        CLIENT_SYNCED_WEAPON_LIMITS_ENABLED = enabled;
         CLIENT_SYNCED_WEAPON_LIMITS_VALID = true;
     }
 

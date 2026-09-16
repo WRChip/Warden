@@ -11,6 +11,7 @@ import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.text.Text;
 import net.minecraft.util.Formatting;
 import net.minecraft.world.GameMode;
+import net.minecraft.world.border.WorldBorder;
 import net.minecraft.world.rule.GameRules;
 
 import java.util.ArrayList;
@@ -87,6 +88,9 @@ public final class WardenRestore {
         WardenWorldState.setLocked(server, false);
         server.getTickManager().setFrozen(false);
         server.getOverworld().getGameRules().setValue(GameRules.RESPAWN_RADIUS, 10, server);
+        WorldBorder border = server.getOverworld().getWorldBorder();
+        border.setCenter(0.0, 0.0);
+        border.setSize(WardenNewWorldWatcher.VANILLA_BORDER_SIZE);
         for (ServerPlayerEntity player : server.getPlayerManager().getPlayerList()) {
             restoreGameMode(player);
         }

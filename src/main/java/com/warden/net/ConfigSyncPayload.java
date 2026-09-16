@@ -13,7 +13,7 @@ public record ConfigSyncPayload(String json, boolean canEdit) implements CustomP
             new CustomPayload.Id<>(Identifier.of("warden", "config_sync"));
 
     public static final PacketCodec<RegistryByteBuf, ConfigSyncPayload> CODEC = PacketCodec.tuple(
-            PacketCodecs.STRING, ConfigSyncPayload::json,
+            PacketCodecs.string(1 << 20), ConfigSyncPayload::json,
             PacketCodecs.BOOLEAN, ConfigSyncPayload::canEdit,
             ConfigSyncPayload::new);
 

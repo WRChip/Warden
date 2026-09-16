@@ -50,11 +50,12 @@ public class WardenModeration {
 
     public static void register() {
         ServerTickEvents.END_SERVER_TICK.register(WardenModeration::tick);
+        // freeze and mute survive a relog; vanish doesn't, so its infinite invisibility must go too
         ServerPlayConnectionEvents.DISCONNECT.register((handler, server) -> {
             UUID id = handler.player.getUuid();
-            FROZEN.remove(id);
-            FROZEN_POS.remove(id);
-            VANISHED.remove(id);
+            if (VANISHED.remove(id)) {
+                handler.player.removeStatusEffect(StatusEffects.INVISIBILITY);
+            }
         });
         ServerPlayConnectionEvents.JOIN.register((handler, sender, server) -> {
             ServerPlayerEntity joined = handler.player;
@@ -89,7 +90,11 @@ public class WardenModeration {
         for (UUID id : FROZEN) {
             ServerPlayerEntity player = server.getPlayerManager().getPlayer(id);
             FreezePoint point = FROZEN_POS.get(id);
-            if (player == null || point == null || player.getEntityWorld() != point.world()) {
+            if (player == null || point == null) {
+                continue;
+            }
+            if (player.getEntityWorld() != point.world()) {
+                player.teleport(point.world(), point.x(), point.y(), point.z(), Set.of(), player.getYaw(), player.getPitch(), false);
                 continue;
             }
             if (player.getX() != point.x() || player.getY() != point.y() || player.getZ() != point.z()) {

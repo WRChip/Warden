@@ -48,6 +48,10 @@ public class WardenCommand {
             new SimpleCommandExceptionType(wardenPrefix().append(Text.literal("Unknown action bar category").formatted(Formatting.RED)));
     private static final DynamicCommandExceptionType INVALID_WEAPON_STAT_TARGET =
             new DynamicCommandExceptionType(message -> wardenPrefix().append(Text.literal(message.toString()).formatted(Formatting.RED)));
+    private static final DynamicCommandExceptionType UNKNOWN_ITEM =
+            new DynamicCommandExceptionType(id -> wardenPrefix().append(Text.literal("Unknown item: " + id).formatted(Formatting.RED)));
+    private static final DynamicCommandExceptionType UNKNOWN_EXPLOSION_SOURCE =
+            new DynamicCommandExceptionType(id -> wardenPrefix().append(Text.literal("Unknown explosion source: " + id + " (expected one of " + String.join(", ", WardenCommand.EXPLOSION_SOURCES) + ")").formatted(Formatting.RED)));
     private static final DynamicCommandExceptionType PLAYER_NOT_FOUND =
             new DynamicCommandExceptionType(name -> wardenPrefix().append(Text.literal("Player not found or offline: " + name).formatted(Formatting.RED)));
     private static final List<String> RESET_CATEGORIES = List.of(
@@ -62,7 +66,7 @@ public class WardenCommand {
     private static final Map<String, List<String>> WEAPON_TARGETS = createWeaponTargets();
     private static final java.util.Set<String> ENCHANT_TARGET_SUGGESTIONS = createEnchantTargetSuggestions();
     private static final java.util.Set<String> WEAPON_TARGET_SUGGESTIONS = createWeaponTargetSuggestions();
-    private static final List<String> ACTION_BAR_CATEGORIES = List.of("item", "weapon", "enchantment", "effect");
+    private static final List<String> ACTION_BAR_CATEGORIES = List.of("item", "weapon", "enchantment", "effect", "xp");
 
     private static Map<String, List<String>> createWeaponTargets() {
         Map<String, List<String>> targets = new LinkedHashMap<>();
@@ -134,6 +138,12 @@ public class WardenCommand {
             return List.of(target);
         }
         return List.of("minecraft:" + target);
+    }
+
+    private static void requireKnownItems(List<String> items) throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        for (String itemId : items) {
+            if (getItem(itemId) == null) throw UNKNOWN_ITEM.create(itemId);
+        }
     }
 
     private static List<String> resolveWeaponItems(String target) {
@@ -665,6 +675,9 @@ public class WardenCommand {
         config.then(literal("effectActionBarEnabled")
                 .executes(ctx -> configShow(ctx, "effectActionBarEnabled", String.valueOf(WardenMod.CONFIG.effectActionBarEnabled)))
                 .then(argument("value", BoolArgumentType.bool()).executes(WardenCommand::configEffectActionBarEnabled)));
+        config.then(literal("xpActionBarEnabled")
+                .executes(ctx -> configShow(ctx, "xpActionBarEnabled", String.valueOf(WardenMod.CONFIG.xpActionBarEnabled)))
+                .then(argument("value", BoolArgumentType.bool()).executes(WardenCommand::configXpActionBarEnabled)));
         config.then(literal("exemptCreative")
                 .executes(ctx -> configShow(ctx, "exemptCreative", String.valueOf(WardenMod.CONFIG.exemptCreative)))
                 .then(argument("value", BoolArgumentType.bool()).executes(WardenCommand::configExemptCreative)));
@@ -1001,7 +1014,7 @@ public class WardenCommand {
             return 0;
         }
         WardenMod.CONFIG.save();
-        if ("weapon".equals(category)) {
+        if ("weapon".equals(category) || "enchant".equals(category)) {
             syncWeaponRules(ctx.getSource());
         }
         ctx.getSource().sendFeedback(() -> wardenPrefix()
@@ -1010,8 +1023,9 @@ public class WardenCommand {
         return 1;
     }
 
-    private static int explosionSet(CommandContext<ServerCommandSource> ctx) {
+    private static int explosionSet(CommandContext<ServerCommandSource> ctx) throws com.mojang.brigadier.exceptions.CommandSyntaxException {
         String source = StringArgumentType.getString(ctx, "source");
+        if (!EXPLOSION_SOURCES.contains(source)) throw UNKNOWN_EXPLOSION_SOURCE.create(source);
         float value = FloatArgumentType.getFloat(ctx, "value");
         WardenConfig.ExplosionSourceConfig src = WardenMod.CONFIG.explosionSources.computeIfAbsent(
                 source, k -> new WardenConfig.ExplosionSourceConfig(true, value));
@@ -1037,8 +1051,9 @@ public class WardenCommand {
         return 1;
     }
 
-    private static int explosionDisable(CommandContext<ServerCommandSource> ctx) {
+    private static int explosionDisable(CommandContext<ServerCommandSource> ctx) throws com.mojang.brigadier.exceptions.CommandSyntaxException {
         String source = StringArgumentType.getString(ctx, "source");
+        if (!EXPLOSION_SOURCES.contains(source)) throw UNKNOWN_EXPLOSION_SOURCE.create(source);
         WardenConfig.ExplosionSourceConfig src = WardenMod.CONFIG.explosionSources.computeIfAbsent(
                 source, k -> new WardenConfig.ExplosionSourceConfig(true, 0f));
         src.maxPower = 0f;
@@ -1097,8 +1112,9 @@ public class WardenCommand {
         return cmd;
     }
 
-    private static int itemSet(CommandContext<ServerCommandSource> ctx) {
+    private static int itemSet(CommandContext<ServerCommandSource> ctx) throws com.mojang.brigadier.exceptions.CommandSyntaxException {
         String item = IdentifierArgumentType.getIdentifier(ctx, "item").toString();
+        if (getItem(item) == null) throw UNKNOWN_ITEM.create(item);
         int value = IntegerArgumentType.getInteger(ctx, "value");
         WardenMod.CONFIG.itemLimits.put(item, value);
         WardenMod.CONFIG.save();
@@ -1121,8 +1137,9 @@ public class WardenCommand {
         return 1;
     }
 
-    private static int itemDisable(CommandContext<ServerCommandSource> ctx) {
+    private static int itemDisable(CommandContext<ServerCommandSource> ctx) throws com.mojang.brigadier.exceptions.CommandSyntaxException {
         String item = IdentifierArgumentType.getIdentifier(ctx, "item").toString();
+        if (getItem(item) == null) throw UNKNOWN_ITEM.create(item);
         WardenMod.CONFIG.itemLimits.put(item, 0);
         WardenMod.CONFIG.save();
         ctx.getSource().sendFeedback(() -> wardenPrefix()
@@ -1171,8 +1188,14 @@ public class WardenCommand {
             case "disableCooldown" -> "disableCooldown";
             case "projectileDamage" -> "projectileDamage";
             case "rechargeTime" -> "rechargeTime";
-            default -> stat;
+            default -> null;
         };
+        if (internalStat == null) {
+            ctx.getSource().sendFeedback(() -> wardenPrefix()
+                    .append(Text.literal("Unknown weapon stat: ").formatted(Formatting.RED))
+                    .append(Text.literal(stat).formatted(Formatting.YELLOW)), false);
+            return 0;
+        }
         return applyWeaponDefault(ctx, internalStat);
     }
 
@@ -1228,6 +1251,7 @@ public class WardenCommand {
             throws com.mojang.brigadier.exceptions.CommandSyntaxException {
         String target = StringArgumentType.getString(ctx, "target");
         List<String> items = resolveWeaponItems(target);
+        requireKnownItems(items);
         validateWeaponStatTarget(stat, target, items);
         int applied = 0;
         int defaulted = 0;
@@ -1291,6 +1315,7 @@ public class WardenCommand {
             throws com.mojang.brigadier.exceptions.CommandSyntaxException {
         String target = StringArgumentType.getString(ctx, "target");
         List<String> items = resolveWeaponItems(target);
+        requireKnownItems(items);
         validateWeaponStatTarget("disableCooldown", target, items);
         for (String itemId : items) {
             WardenConfig.WeaponLimitConfig cfg = WardenMod.CONFIG.weaponLimits.computeIfAbsent(
@@ -1325,6 +1350,7 @@ public class WardenCommand {
             throws com.mojang.brigadier.exceptions.CommandSyntaxException {
         String target = StringArgumentType.getString(ctx, "target");
         List<String> items = resolveWeaponItems(target);
+        requireKnownItems(items);
         validateWeaponStatTarget("projectileDamage", target, items);
         for (String itemId : items) {
             WardenConfig.WeaponLimitConfig cfg = WardenMod.CONFIG.weaponLimits.computeIfAbsent(
@@ -1348,6 +1374,7 @@ public class WardenCommand {
         String target = StringArgumentType.getString(ctx, "target");
         List<String> items = resolveWeaponItems(target);
         validateWeaponStatTarget("rechargeTime", target, items);
+        requireKnownItems(items);
         for (String itemId : items) {
             WardenConfig.WeaponLimitConfig cfg = WardenMod.CONFIG.weaponLimits.computeIfAbsent(
                     itemId, k -> new WardenConfig.WeaponLimitConfig()
@@ -1372,6 +1399,7 @@ public class WardenCommand {
             throws com.mojang.brigadier.exceptions.CommandSyntaxException {
         String target = StringArgumentType.getString(ctx, "target");
         List<String> items = resolveWeaponItems(target);
+        requireKnownItems(items);
         validateWeaponStatTarget(stat, target, items);
         int reset = 0;
         for (String itemId : items) {
@@ -1414,6 +1442,7 @@ public class WardenCommand {
             }
         }
         WardenMod.CONFIG.save();
+        syncWeaponRules(ctx.getSource());
         int resetCount = reset;
         String label = items.size() == 1 ? items.get(0) : target + " (" + items.size() + " items)";
 
@@ -1444,9 +1473,10 @@ public class WardenCommand {
         return 1;
     }
 
-    private static int weaponDisable(CommandContext<ServerCommandSource> ctx) {
+    private static int weaponDisable(CommandContext<ServerCommandSource> ctx) throws com.mojang.brigadier.exceptions.CommandSyntaxException {
         String target = StringArgumentType.getString(ctx, "target");
         List<String> items = resolveWeaponItems(target);
+        requireKnownItems(items);
         for (String itemId : items) {
             WardenConfig.WeaponLimitConfig cfg = WardenMod.CONFIG.weaponLimits.computeIfAbsent(itemId, k -> new WardenConfig.WeaponLimitConfig());
             cfg.attackDamage = 0.0;
@@ -1466,9 +1496,10 @@ public class WardenCommand {
         return 1;
     }
 
-    private static int weaponRemove(CommandContext<ServerCommandSource> ctx) {
+    private static int weaponRemove(CommandContext<ServerCommandSource> ctx) throws com.mojang.brigadier.exceptions.CommandSyntaxException {
         String target = StringArgumentType.getString(ctx, "target");
         List<String> items = resolveWeaponItems(target);
+        requireKnownItems(items);
         int removed = 0;
         for (String itemId : items) {
             if (WardenMod.CONFIG.weaponLimits.remove(itemId) != null) {
@@ -1476,6 +1507,7 @@ public class WardenCommand {
             }
         }
         WardenMod.CONFIG.save();
+        syncWeaponRules(ctx.getSource());
         int removedCount = removed;
         String label = items.size() == 1 ? items.get(0) : target + " (" + items.size() + " items)";
         ctx.getSource().sendFeedback(() -> wardenPrefix()
@@ -1531,11 +1563,12 @@ public class WardenCommand {
         return 1;
     }
 
-    private static int enchantToolSet(CommandContext<ServerCommandSource> ctx) {
+    private static int enchantToolSet(CommandContext<ServerCommandSource> ctx) throws com.mojang.brigadier.exceptions.CommandSyntaxException {
         String target = StringArgumentType.getString(ctx, "target");
         String enchId = IdentifierArgumentType.getIdentifier(ctx, "enchantment").toString();
         int level = IntegerArgumentType.getInteger(ctx, "value");
         List<String> items = resolveTargetItems(target);
+        requireKnownItems(items);
         for (String itemId : items) {
             WardenMod.CONFIG.itemEnchantmentOverrides.computeIfAbsent(itemId, k -> new LinkedHashMap<>()).put(enchId, level);
         }
@@ -1552,10 +1585,11 @@ public class WardenCommand {
         return 1;
     }
 
-    private static int enchantToolSetDefault(CommandContext<ServerCommandSource> ctx) {
+    private static int enchantToolSetDefault(CommandContext<ServerCommandSource> ctx) throws com.mojang.brigadier.exceptions.CommandSyntaxException {
         String target = StringArgumentType.getString(ctx, "target");
         String enchId = IdentifierArgumentType.getIdentifier(ctx, "enchantment").toString();
         List<String> items = resolveTargetItems(target);
+        requireKnownItems(items);
         for (String itemId : items) {
             WardenMod.CONFIG.itemEnchantmentOverrides.computeIfAbsent(itemId, k -> new LinkedHashMap<>()).put(enchId, -1);
         }
@@ -1567,18 +1601,20 @@ public class WardenCommand {
                 .append(Text.literal(label).formatted(Formatting.YELLOW))
                 .append(Text.literal(".").formatted(Formatting.GRAY))
                 .append(Text.literal(enchId).formatted(Formatting.YELLOW))
-                .append(Text.literal(" reset to default (follow global/unlimited)").formatted(Formatting.GREEN)), true);
+                .append(Text.literal(" reset to default (unlimited, overrides global)").formatted(Formatting.GREEN)), true);
         return 1;
     }
 
-    private static int enchantToolDisable(CommandContext<ServerCommandSource> ctx) {
+    private static int enchantToolDisable(CommandContext<ServerCommandSource> ctx) throws com.mojang.brigadier.exceptions.CommandSyntaxException {
         String target = StringArgumentType.getString(ctx, "target");
         String enchId = IdentifierArgumentType.getIdentifier(ctx, "enchantment").toString();
         List<String> items = resolveTargetItems(target);
+        requireKnownItems(items);
         for (String itemId : items) {
             WardenMod.CONFIG.itemEnchantmentOverrides.computeIfAbsent(itemId, k -> new LinkedHashMap<>()).put(enchId, 0);
         }
         WardenMod.CONFIG.save();
+        syncWeaponRules(ctx.getSource());
         String label = items.size() == 1 ? items.get(0) : target + " (" + items.size() + " items)";
         ctx.getSource().sendFeedback(() -> wardenPrefix()
                 .append(Text.literal("enchant.").formatted(Formatting.GRAY))
@@ -1589,10 +1625,11 @@ public class WardenCommand {
         return 1;
     }
 
-    private static int enchantToolRemove(CommandContext<ServerCommandSource> ctx) {
+    private static int enchantToolRemove(CommandContext<ServerCommandSource> ctx) throws com.mojang.brigadier.exceptions.CommandSyntaxException {
         String target = StringArgumentType.getString(ctx, "target");
         String enchId = IdentifierArgumentType.getIdentifier(ctx, "enchantment").toString();
         List<String> items = resolveTargetItems(target);
+        requireKnownItems(items);
         int removed = 0;
         for (String itemId : items) {
             Map<String, Integer> overrides = WardenMod.CONFIG.itemEnchantmentOverrides.get(itemId);
@@ -2081,6 +2118,16 @@ public class WardenCommand {
         return 1;
     }
 
+    private static int configXpActionBarEnabled(CommandContext<ServerCommandSource> ctx) {
+        boolean value = BoolArgumentType.getBool(ctx, "value");
+        WardenMod.CONFIG.xpActionBarEnabled = value;
+        WardenMod.CONFIG.save();
+        ctx.getSource().sendFeedback(() -> wardenPrefix()
+                .append(Text.literal("xpActionBarEnabled = ").formatted(Formatting.GRAY))
+                .append(Text.literal(String.valueOf(value)).formatted(value ? Formatting.GREEN : Formatting.RED)), true);
+        return 1;
+    }
+
     private static int configItemActionBarEnabled(CommandContext<ServerCommandSource> ctx) {
         boolean value = BoolArgumentType.getBool(ctx, "value");
         WardenMod.CONFIG.itemActionBarEnabled = value;
@@ -2277,7 +2324,9 @@ public class WardenCommand {
 
     private static int exemptAdd(CommandContext<ServerCommandSource> ctx) {
         String player = StringArgumentType.getString(ctx, "player");
-        WardenMod.CONFIG.exemptPlayers.add(exemptKey(ctx.getSource().getServer(), player));
+        String key = exemptKey(ctx.getSource().getServer(), player);
+        if (!key.equals(player)) WardenMod.CONFIG.exemptPlayers.remove(player);
+        WardenMod.CONFIG.exemptPlayers.add(key);
         WardenMod.CONFIG.save();
         ctx.getSource().sendFeedback(() -> wardenPrefix()
                 .append(Text.literal("Exempted: ").formatted(Formatting.GRAY))
@@ -2533,8 +2582,8 @@ public class WardenCommand {
     }
 
     private static Item getItem(String itemId) {
-        Identifier identifier = Identifier.of(itemId);
-        return Registries.ITEM.containsId(identifier) ? Registries.ITEM.get(identifier) : null;
+        Identifier identifier = Identifier.tryParse(itemId);
+        return identifier != null && Registries.ITEM.containsId(identifier) ? Registries.ITEM.get(identifier) : null;
     }
 
     private static Double getVanillaWeaponDouble(Item item, String stat) {
