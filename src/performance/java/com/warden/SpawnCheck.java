@@ -2,6 +2,7 @@ package com.warden;
 
 import com.mojang.authlib.GameProfile;
 import com.warden.config.WardenConfig;
+import com.warden.net.ConfigUpdatePayload;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
 import net.fabricmc.fabric.api.event.player.AttackBlockCallback;
@@ -155,11 +156,26 @@ public final class SpawnCheck {
             var fail = ActionResult.FAIL;
             var pass = ActionResult.PASS;
             player.setStackInHand(hand, stack);
+            var staleDraft = WardenMod.CONFIG.toJsonObject();
+            var editedDraft = staleDraft.deepCopy();
             var dispatcher = server.getCommandManager().getDispatcher();
             require(dispatcher.execute("warden usage block ender_pearl", server.getCommandSource()) == 1, "block command");
             require(WardenMod.CONFIG.blockedItemUsage.contains("minecraft:ender_pearl"), "canonical item id");
             WardenMod.CONFIG = WardenConfig.load();
             require(WardenItemUsage.check(player, hand) == fail, "usage rule survives save and reload");
+            require(player.interactionManager.interactItem(player, world, stack, hand) == fail,
+                    "server item-use path blocks ender pearls");
+            require(stack.getCount() == 8, "blocked throw must not consume a pearl");
+            editedDraft.getAsJsonObject("exempt").addProperty("creative", false);
+            var update = ConfigUpdatePayload.between(staleDraft, editedDraft);
+            server.getPlayerManager().addToOperators(player.getPlayerConfigEntry());
+            var applyUpdate = WardenNetworking.class.getDeclaredMethod("applyConfigUpdate", ServerPlayerEntity.class, String.class);
+            applyUpdate.setAccessible(true);
+            applyUpdate.invoke(null, player, update.json());
+            require(!WardenMod.CONFIG.exemptCreative, "screen edit applies");
+            require(player.interactionManager.interactItem(player, world, stack, hand) == fail,
+                    "saving a stale config screen must not undo the pearl restriction");
+            WardenMod.CONFIG.exemptCreative = true;
             require(UseItemCallback.EVENT.invoker()
                     .interact(player, world, hand) == fail, "right click in air");
             var pos = new BlockPos(0, -61, 0);
@@ -198,6 +214,9 @@ public final class SpawnCheck {
             dispatcher.execute("warden usage toggle true", server.getCommandSource());
             dispatcher.execute("warden usage allow ender_pearl", server.getCommandSource());
             require(WardenItemUsage.check(player, hand) == pass, "allow command");
+            require(player.interactionManager.interactItem(player, world, stack, hand).isAccepted(),
+                    "allowed pearl reaches vanilla item use");
+            require(stack.getCount() == 7, "allowed throw consumes a pearl");
             WardenMod.CONFIG.blockedItemUsage.add("minecraft:ender_pearl");
             require(WardenMod.CONFIG.resetCategory("usage") && WardenMod.CONFIG.blockedItemUsage.isEmpty(), "usage reset");
             WardenMod.CONFIG.blockedItemUsage.add("minecraft:ender_pearl");

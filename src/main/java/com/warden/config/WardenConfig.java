@@ -83,12 +83,6 @@ public class WardenConfig {
     public int maxBlockEntityBytes = 32768;
     public int maxChunkBlockEntityBytes = 1048576;
 
-    // bucket-drain guard: refuses further source-block pickups once a player fills more than
-    // maxBucketDrains buckets within bucketDrainWindowTicks
-    public boolean bucketDrainEnabled = true;
-    public int maxBucketDrains = 6;
-    public int bucketDrainWindowTicks = 100;
-
     public static class ExplosionSourceConfig {
         public boolean enabled;
         public float maxPower;
@@ -252,11 +246,6 @@ public class WardenConfig {
                 maxBlockEntityBytes = 32768;
                 maxChunkBlockEntityBytes = 1048576;
             }
-            case "bucketdrain" -> {
-                bucketDrainEnabled = true;
-                maxBucketDrains = 6;
-                bucketDrainWindowTicks = 100;
-            }
             default -> {
                 return false;
             }
@@ -304,9 +293,6 @@ public class WardenConfig {
         maxItemBytes = 65536;
         maxBlockEntityBytes = 32768;
         maxChunkBlockEntityBytes = 1048576;
-        bucketDrainEnabled = true;
-        maxBucketDrains = 6;
-        bucketDrainWindowTicks = 100;
     }
 
     private void readFrom(JsonObject root) {
@@ -492,13 +478,6 @@ public class WardenConfig {
             maxChunkBlockEntityBytes = cb.has("max_chunk_block_entity_bytes") ? cb.get("max_chunk_block_entity_bytes").getAsInt() : 1048576;
         }
 
-        if (root.has("bucket_drain")) {
-            JsonObject bd = root.getAsJsonObject("bucket_drain");
-            bucketDrainEnabled = getBool(bd, "enabled", true);
-            maxBucketDrains = bd.has("max_drains") ? bd.get("max_drains").getAsInt() : 6;
-            bucketDrainWindowTicks = bd.has("window_ticks") ? bd.get("window_ticks").getAsInt() : 100;
-        }
-
         if (root.has("exempt")) {
             JsonObject ex = root.getAsJsonObject("exempt");
             exemptCreative = getBool(ex, "creative", true);
@@ -672,12 +651,6 @@ public class WardenConfig {
         chunkBanSection.addProperty("max_block_entity_bytes", maxBlockEntityBytes);
         chunkBanSection.addProperty("max_chunk_block_entity_bytes", maxChunkBlockEntityBytes);
         root.add("chunk_ban", chunkBanSection);
-
-        JsonObject bucketDrainSection = new JsonObject();
-        bucketDrainSection.addProperty("enabled", bucketDrainEnabled);
-        bucketDrainSection.addProperty("max_drains", maxBucketDrains);
-        bucketDrainSection.addProperty("window_ticks", bucketDrainWindowTicks);
-        root.add("bucket_drain", bucketDrainSection);
 
         return root;
     }

@@ -73,8 +73,7 @@ public class WardenMod implements ModInitializer {
         ENCHANTMENT,
         EFFECT,
         XP,
-        DIMENSION,
-        BUCKET
+        DIMENSION
     }
 
     public static final Logger LOGGER = LoggerFactory.getLogger("Warden");
@@ -87,22 +86,6 @@ public class WardenMod implements ModInitializer {
     // set once the server has its registries; item encoding needs them
     public static volatile DynamicRegistryManager REGISTRIES;
     private static final Map<String, Long> LAST_OVERSIZE_LOG = new ConcurrentHashMap<>();
-    private record DrainWindow(int startTick, int count) {}
-    private static final Map<UUID, DrainWindow> BUCKET_DRAINS = new ConcurrentHashMap<>();
-
-    /** Returns true once the player has gone over the limit for the current window. */
-    public static boolean registerBucketDrain(ServerPlayerEntity player) {
-        // server ticks, not player.age: age restarts at 0 on death and relog
-        int now = player.getEntityWorld().getServer().getTicks();
-        UUID id = player.getUuid();
-        DrainWindow window = BUCKET_DRAINS.compute(id, (k, prev) -> {
-            if (prev == null || now - prev.startTick() > CONFIG.bucketDrainWindowTicks) {
-                return new DrainWindow(now, 1);
-            }
-            return new DrainWindow(prev.startTick(), prev.count() + 1);
-        });
-        return window.count() > CONFIG.maxBucketDrains;
-    }
     private static final Map<UUID, LastNotice> LAST_NOTICE = new HashMap<>();
 
     @Override
@@ -140,12 +123,10 @@ public class WardenMod implements ModInitializer {
         ServerPlayConnectionEvents.DISCONNECT.register((handler, server) -> {
             LAST_PICKUP_NOTICE.remove(handler.player.getUuid());
             LAST_NOTICE.remove(handler.player.getUuid());
-            BUCKET_DRAINS.remove(handler.player.getUuid());
         });
         ServerLifecycleEvents.SERVER_STOPPED.register(server -> {
             LAST_PICKUP_NOTICE.clear();
             LAST_NOTICE.clear();
-            BUCKET_DRAINS.clear();
             LAST_OVERSIZE_LOG.clear();
         });
         ServerTickEvents.END_SERVER_TICK.register((MinecraftServer server) -> {
@@ -191,7 +172,6 @@ public class WardenMod implements ModInitializer {
             case EFFECT -> CONFIG.effectActionBarEnabled;
             case XP -> CONFIG.xpActionBarEnabled;
             case DIMENSION -> true;
-            case BUCKET -> true;
         };
         if (!enabledGlobally) {
             return;
@@ -225,7 +205,6 @@ public class WardenMod implements ModInitializer {
             case EFFECT -> "effect";
             case XP -> "xp";
             case DIMENSION -> "dimension";
-            case BUCKET -> "bucket";
         };
     }
 
@@ -1012,8 +991,9 @@ public class WardenMod implements ModInitializer {
     }
 
     private static ItemStack resolveProjectileWeaponStack(PersistentProjectileEntity projectile) {
+        // null for arrows without a recorded weapon: mob and dispenser shots, or ones saved by older versions
         ItemStack weaponStack = projectile.getWeaponStack();
-        if (!weaponStack.isEmpty()) {
+        if (weaponStack != null && !weaponStack.isEmpty()) {
             return weaponStack;
         }
         if (projectile.getOwner() instanceof PlayerEntity player) {

@@ -43,9 +43,8 @@ public final class WardenConfigScreen {
             "enchantment", "Enchantment cap notices",
             "effect", "Effect cap notices",
             "xp", "XP cap notices",
-            "dimension", "Blocked dimension notices",
-            "bucket", "Bucket-drain notices");
-    private static final List<String> NOTICE_ORDER = List.of("item", "weapon", "enchantment", "effect", "xp", "dimension", "bucket");
+            "dimension", "Blocked dimension notices");
+    private static final List<String> NOTICE_ORDER = List.of("item", "weapon", "enchantment", "effect", "xp", "dimension");
 
     private WardenConfigScreen() {
     }
@@ -53,6 +52,7 @@ public final class WardenConfigScreen {
     public static Screen create(Screen parent) {
         boolean connected = WardenClientState.connected();
         JsonObject draft = connected ? WardenClientState.serverConfig.deepCopy() : null;
+        JsonObject original = draft == null ? null : draft.deepCopy();
         boolean canEdit = connected && WardenClientState.canEdit;
         Set<String> disabled = new LinkedHashSet<>(WardenClientState.disabledNotices);
         boolean[] noticesDirty = {false};
@@ -72,8 +72,7 @@ public final class WardenConfigScreen {
                 noticesDirty[0] = false;
             }
             if (draftDirty[0] && canEdit && WardenClientState.connected()) {
-                draft.remove("my_disabled_notices");
-                ClientPlayNetworking.send(new ConfigUpdatePayload(draft.toString()));
+                ClientPlayNetworking.send(ConfigUpdatePayload.between(original, draft));
                 draftDirty[0] = false;
             }
             if (!rejected.isEmpty()) {
@@ -140,7 +139,6 @@ public final class WardenConfigScreen {
         JsonObject dimensions = draft.getAsJsonObject("dimension_limits");
         JsonObject antiCrack = draft.getAsJsonObject("anti_seedcrack");
         JsonObject chunkBan = draft.getAsJsonObject("chunk_ban");
-        JsonObject bucketDrain = draft.getAsJsonObject("bucket_drain");
         JsonObject exempt = draft.has("exempt") ? draft.getAsJsonObject("exempt") : null;
 
         OptionGroup.Builder general = OptionGroup.createBuilder().name(Text.literal("General"));
@@ -157,9 +155,6 @@ public final class WardenConfigScreen {
         general.option(intField("Chunk-ban: max bytes per item", chunkBan, "max_item_bytes", 1024, canEdit, dirty));
         general.option(intField("Chunk-ban: max bytes per block entity", chunkBan, "max_block_entity_bytes", 1024, canEdit, dirty));
         general.option(intField("Chunk-ban: max block entity bytes per chunk", chunkBan, "max_chunk_block_entity_bytes", 65536, canEdit, dirty));
-        general.option(toggle("Bucket-drain guard", bucketDrain, "enabled", canEdit, dirty));
-        general.option(intField("Bucket-drain: max fills per window", bucketDrain, "max_drains", 1, canEdit, dirty));
-        general.option(intField("Bucket-drain: window (ticks)", bucketDrain, "window_ticks", 20, canEdit, dirty));
         general.option(intField("Item check interval (ticks)", items, "check_interval_ticks", 1, canEdit, dirty));
         general.option(intField("Dropped overflow pickup delay (ticks)", items, "drop_pickup_delay", 0, canEdit, dirty));
         general.option(toggle("Delete overflow instead of dropping it", items, "delete_overflow_item", canEdit, dirty));

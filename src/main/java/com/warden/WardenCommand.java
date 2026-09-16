@@ -191,7 +191,6 @@ public class WardenCommand {
         root.then(buildConfigCommand());
         root.then(buildFreezeCommand());
         root.then(buildMuteCommand());
-        root.then(buildVanishCommand());
         root.then(buildInventoryCommand());
         root.then(buildEnderChestCommand());
         return root;
@@ -229,12 +228,6 @@ public class WardenCommand {
                         .executes(WardenCommand::muteToggle));
     }
 
-    private static com.mojang.brigadier.builder.LiteralArgumentBuilder<ServerCommandSource> buildVanishCommand() {
-        return literal("vanish")
-                .requires(src -> hasAdminPermission(src) && src.getEntity() instanceof ServerPlayerEntity)
-                .executes(WardenCommand::vanishToggle);
-    }
-
     private static com.mojang.brigadier.builder.LiteralArgumentBuilder<ServerCommandSource> buildInventoryCommand() {
         return literal("inv").requires(WardenCommand::hasAdminPermission)
                 .then(argument("player", StringArgumentType.word())
@@ -268,14 +261,6 @@ public class WardenCommand {
                 .append(Text.literal(muted ? " is now muted." : " is no longer muted.").formatted(muted ? Formatting.RED : Formatting.GREEN)), true);
         target.sendMessage(wardenPrefix().append(Text.literal(muted ? "You have been muted by an admin." : "You have been unmuted.")
                 .formatted(muted ? Formatting.RED : Formatting.GREEN)));
-        return 1;
-    }
-
-    private static int vanishToggle(CommandContext<ServerCommandSource> ctx) throws com.mojang.brigadier.exceptions.CommandSyntaxException {
-        ServerPlayerEntity player = ctx.getSource().getPlayerOrThrow();
-        boolean vanished = com.warden.vanish.Vanish.toggle(player);
-        ctx.getSource().sendFeedback(() -> wardenPrefix()
-                .append(Text.literal(vanished ? "Vanish enabled." : "Vanish disabled.").formatted(vanished ? Formatting.GREEN : Formatting.RED)), false);
         return 1;
     }
 
@@ -645,15 +630,6 @@ public class WardenCommand {
         config.then(literal("maxChunkBlockEntityBytes")
                 .executes(ctx -> configShow(ctx, "maxChunkBlockEntityBytes", String.valueOf(WardenMod.CONFIG.maxChunkBlockEntityBytes)))
                 .then(argument("value", IntegerArgumentType.integer(65536)).executes(ctx -> configSetInt(ctx, "maxChunkBlockEntityBytes", v -> WardenMod.CONFIG.maxChunkBlockEntityBytes = v))));
-        config.then(literal("bucketDrainEnabled")
-                .executes(ctx -> configShow(ctx, "bucketDrainEnabled", String.valueOf(WardenMod.CONFIG.bucketDrainEnabled)))
-                .then(argument("value", BoolArgumentType.bool()).executes(ctx -> configSetBool(ctx, "bucketDrainEnabled", v -> WardenMod.CONFIG.bucketDrainEnabled = v))));
-        config.then(literal("maxBucketDrains")
-                .executes(ctx -> configShow(ctx, "maxBucketDrains", String.valueOf(WardenMod.CONFIG.maxBucketDrains)))
-                .then(argument("value", IntegerArgumentType.integer(1)).executes(ctx -> configSetInt(ctx, "maxBucketDrains", v -> WardenMod.CONFIG.maxBucketDrains = v))));
-        config.then(literal("bucketDrainWindowTicks")
-                .executes(ctx -> configShow(ctx, "bucketDrainWindowTicks", String.valueOf(WardenMod.CONFIG.bucketDrainWindowTicks)))
-                .then(argument("value", IntegerArgumentType.integer(20)).executes(ctx -> configSetInt(ctx, "bucketDrainWindowTicks", v -> WardenMod.CONFIG.bucketDrainWindowTicks = v))));
         config.then(literal("checkIntervalTicks")
                 .executes(ctx -> configShow(ctx, "checkIntervalTicks", String.valueOf(WardenMod.CONFIG.checkIntervalTicks)))
                 .then(argument("value", IntegerArgumentType.integer(1)).executes(WardenCommand::configCheckIntervalTicks)));
@@ -2038,12 +2014,6 @@ public class WardenCommand {
                 .append(Text.literal(String.valueOf(cfg.maxBlockEntityBytes)).formatted(Formatting.AQUA));
         response.append(Text.literal("\n  maxChunkBlockEntityBytes = ").formatted(Formatting.GRAY))
                 .append(Text.literal(String.valueOf(cfg.maxChunkBlockEntityBytes)).formatted(Formatting.AQUA));
-        response.append(Text.literal("\n  bucketDrainEnabled = ").formatted(Formatting.GRAY))
-                .append(Text.literal(String.valueOf(cfg.bucketDrainEnabled)).formatted(cfg.bucketDrainEnabled ? Formatting.GREEN : Formatting.RED));
-        response.append(Text.literal("\n  maxBucketDrains = ").formatted(Formatting.GRAY))
-                .append(Text.literal(String.valueOf(cfg.maxBucketDrains)).formatted(Formatting.AQUA));
-        response.append(Text.literal("\n  bucketDrainWindowTicks = ").formatted(Formatting.GRAY))
-                .append(Text.literal(String.valueOf(cfg.bucketDrainWindowTicks)).formatted(Formatting.AQUA));
 
         ctx.getSource().sendFeedback(() -> response, false);
         return 1;
@@ -2477,9 +2447,6 @@ public class WardenCommand {
                 .append(Text.literal("freeze/mute ").formatted(Formatting.GREEN))
                 .append(Text.literal("<player>").formatted(Formatting.YELLOW))
                 .append(Text.literal(" (toggle)").formatted(Formatting.GRAY));
-        response.append(Text.literal("\n  /warden ").formatted(Formatting.AQUA))
-                .append(Text.literal("vanish").formatted(Formatting.GREEN))
-                .append(Text.literal(" (toggle, self)").formatted(Formatting.GRAY));
         response.append(Text.literal("\n  /warden ").formatted(Formatting.AQUA))
                 .append(Text.literal("inv/enderchest ").formatted(Formatting.GREEN))
                 .append(Text.literal("<player>").formatted(Formatting.YELLOW));

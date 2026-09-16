@@ -27,8 +27,8 @@ public final class WardenNetworking {
 
     private static final List<String> EDITABLE_SECTIONS = List.of(
             "explosion_limits", "item_limits", "item_usage", "weapon_limits", "enchantment_limits",
-            "effect_limits", "xp_limits", "dimension_limits", "anti_seedcrack", "chunk_ban", "bucket_drain", "action_bar", "exempt");
-    private static final List<String> NOTICE_CATEGORIES = List.of("item", "weapon", "enchantment", "effect", "xp", "dimension", "bucket");
+            "effect_limits", "xp_limits", "dimension_limits", "anti_seedcrack", "chunk_ban", "action_bar", "exempt");
+    private static final List<String> NOTICE_CATEGORIES = List.of("item", "weapon", "enchantment", "effect", "xp", "dimension");
     private static boolean prefsDirty;
 
     private WardenNetworking() {
