@@ -5,23 +5,10 @@ import net.fabricmc.fabric.api.event.player.AttackEntityCallback;
 import net.fabricmc.fabric.api.event.player.PlayerBlockBreakEvents;
 import net.fabricmc.fabric.api.event.player.UseBlockCallback;
 import net.fabricmc.fabric.api.event.player.UseItemCallback;
-import com.mojang.datafixers.util.Pair;
 import net.fabricmc.fabric.api.message.v1.ServerMessageEvents;
-import net.fabricmc.fabric.api.networking.v1.ServerPlayConnectionEvents;
-import net.minecraft.entity.EntityType;
-import net.minecraft.entity.EquipmentSlot;
-import net.minecraft.entity.data.DataTracker;
-import net.minecraft.entity.effect.StatusEffectInstance;
-import net.minecraft.entity.effect.StatusEffects;
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.inventory.Inventory;
 import net.minecraft.item.ItemStack;
-import net.minecraft.network.packet.s2c.play.EntitiesDestroyS2CPacket;
-import net.minecraft.network.packet.s2c.play.EntityEquipmentUpdateS2CPacket;
-import net.minecraft.network.packet.s2c.play.EntitySpawnS2CPacket;
-import net.minecraft.network.packet.s2c.play.EntityTrackerUpdateS2CPacket;
-import net.minecraft.network.packet.s2c.play.PlayerListS2CPacket;
-import net.minecraft.network.packet.s2c.play.PlayerRemoveS2CPacket;
 import net.minecraft.screen.GenericContainerScreenHandler;
 import net.minecraft.screen.ScreenHandlerType;
 import net.minecraft.screen.SimpleNamedScreenHandlerFactory;
@@ -32,8 +19,6 @@ import net.minecraft.text.Text;
 import net.minecraft.util.ActionResult;
 import net.minecraft.util.Formatting;
 
-import java.util.ArrayList;
-import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
@@ -46,26 +31,9 @@ public class WardenModeration {
     private static final Set<UUID> FROZEN = ConcurrentHashMap.newKeySet();
     private static final Map<UUID, FreezePoint> FROZEN_POS = new ConcurrentHashMap<>();
     private static final Set<UUID> MUTED = ConcurrentHashMap.newKeySet();
-    private static final Set<UUID> VANISHED = ConcurrentHashMap.newKeySet();
 
     public static void register() {
         ServerTickEvents.END_SERVER_TICK.register(WardenModeration::tick);
-        // freeze and mute survive a relog; vanish doesn't, so its infinite invisibility must go too
-        ServerPlayConnectionEvents.DISCONNECT.register((handler, server) -> {
-            UUID id = handler.player.getUuid();
-            if (VANISHED.remove(id)) {
-                handler.player.removeStatusEffect(StatusEffects.INVISIBILITY);
-            }
-        });
-        ServerPlayConnectionEvents.JOIN.register((handler, sender, server) -> {
-            ServerPlayerEntity joined = handler.player;
-            for (UUID id : VANISHED) {
-                ServerPlayerEntity vanished = server.getPlayerManager().getPlayer(id);
-                if (vanished != null && vanished != joined) {
-                    hideFrom(joined, vanished);
-                }
-            }
-        });
         ServerMessageEvents.ALLOW_CHAT_MESSAGE.register((message, sender, params) -> {
             if (!isMuted(sender.getUuid())) {
                 return true;
@@ -112,10 +80,6 @@ public class WardenModeration {
         return MUTED.contains(id);
     }
 
-    public static boolean isVanished(UUID id) {
-        return VANISHED.contains(id);
-    }
-
     static boolean toggleFreeze(ServerPlayerEntity target) {
         UUID id = target.getUuid();
         if (FROZEN.remove(id)) {
@@ -134,52 +98,6 @@ public class WardenModeration {
         }
         MUTED.add(id);
         return true;
-    }
-
-    static boolean toggleVanish(ServerPlayerEntity player) {
-        UUID id = player.getUuid();
-        if (VANISHED.remove(id)) {
-            player.removeStatusEffect(StatusEffects.INVISIBILITY);
-            for (ServerPlayerEntity viewer : ((ServerWorld) player.getEntityWorld()).getServer().getPlayerManager().getPlayerList()) {
-                if (viewer != player) {
-                    showTo(viewer, player);
-                }
-            }
-            return false;
-        }
-        VANISHED.add(id);
-        player.addStatusEffect(new StatusEffectInstance(StatusEffects.INVISIBILITY, -1, 0, true, false, false));
-        for (ServerPlayerEntity viewer : ((ServerWorld) player.getEntityWorld()).getServer().getPlayerManager().getPlayerList()) {
-            if (viewer != player) {
-                hideFrom(viewer, player);
-            }
-        }
-        return true;
-    }
-
-    // removes the player from the tab list and despawns them client-side for viewer;
-    // EntityTrackerEntryMixin stops future re-tracking from undoing this while still vanished
-    private static void hideFrom(ServerPlayerEntity viewer, ServerPlayerEntity target) {
-        viewer.networkHandler.sendPacket(new PlayerRemoveS2CPacket(List.of(target.getUuid())));
-        viewer.networkHandler.sendPacket(new EntitiesDestroyS2CPacket(target.getId()));
-    }
-
-    // manually rebuilds the spawn/data/equipment packets a real tracker startTracking() would send
-    private static void showTo(ServerPlayerEntity viewer, ServerPlayerEntity target) {
-        viewer.networkHandler.sendPacket(PlayerListS2CPacket.entryFromPlayer(List.of(target)));
-        viewer.networkHandler.sendPacket(new EntitySpawnS2CPacket(
-                target.getId(), target.getUuid(), target.getX(), target.getY(), target.getZ(),
-                target.getPitch(), target.getYaw(), EntityType.PLAYER, 0, target.getVelocity(), target.getHeadYaw()));
-        List<DataTracker.SerializedEntry<?>> trackedEntries = target.getDataTracker().getChangedEntries();
-        if (trackedEntries != null && !trackedEntries.isEmpty()) {
-            viewer.networkHandler.sendPacket(new EntityTrackerUpdateS2CPacket(target.getId(), trackedEntries));
-        }
-        List<Pair<EquipmentSlot, ItemStack>> equipment = new ArrayList<>();
-        for (EquipmentSlot slot : List.of(EquipmentSlot.HEAD, EquipmentSlot.CHEST, EquipmentSlot.LEGS,
-                EquipmentSlot.FEET, EquipmentSlot.MAINHAND, EquipmentSlot.OFFHAND)) {
-            equipment.add(new Pair<>(slot, target.getEquippedStack(slot)));
-        }
-        viewer.networkHandler.sendPacket(new EntityEquipmentUpdateS2CPacket(target.getId(), equipment));
     }
 
     static void openInventoryView(ServerPlayerEntity moderator, ServerPlayerEntity target) {

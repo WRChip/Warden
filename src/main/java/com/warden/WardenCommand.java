@@ -273,7 +273,7 @@ public class WardenCommand {
 
     private static int vanishToggle(CommandContext<ServerCommandSource> ctx) throws com.mojang.brigadier.exceptions.CommandSyntaxException {
         ServerPlayerEntity player = ctx.getSource().getPlayerOrThrow();
-        boolean vanished = WardenModeration.toggleVanish(player);
+        boolean vanished = com.warden.vanish.Vanish.toggle(player);
         ctx.getSource().sendFeedback(() -> wardenPrefix()
                 .append(Text.literal(vanished ? "Vanish enabled." : "Vanish disabled.").formatted(vanished ? Formatting.GREEN : Formatting.RED)), false);
         return 1;
@@ -1088,6 +1088,7 @@ public class WardenCommand {
         cmd.then(literal("toggle").then(argument("enabled", BoolArgumentType.bool()).executes(ctx -> {
             WardenMod.CONFIG.itemUsageEnabled = BoolArgumentType.getBool(ctx, "enabled");
             WardenMod.CONFIG.save();
+            WardenNetworking.syncWeaponLimits(ctx.getSource().getServer());
             ctx.getSource().sendFeedback(() -> wardenPrefix().append(Text.literal(
                     "Item usage restrictions: " + WardenMod.CONFIG.itemUsageEnabled)), true);
             return 1;
@@ -1104,6 +1105,7 @@ public class WardenCommand {
                         if (action.equals("block")) WardenMod.CONFIG.blockedItemUsage.add(id.toString());
                         else WardenMod.CONFIG.blockedItemUsage.remove(id.toString());
                         WardenMod.CONFIG.save();
+                        WardenNetworking.syncWeaponLimits(ctx.getSource().getServer());
                         ctx.getSource().sendFeedback(() -> wardenPrefix().append(Text.literal(
                                 id + " usage " + (action.equals("block") ? "blocked (inventory and crafting allowed)" : "allowed"))), true);
                         return 1;
