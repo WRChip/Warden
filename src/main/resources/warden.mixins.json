@@ -18,11 +18,33 @@
     "LivingEntityMixin_Xp",
     "VillagerEntityMixin",
     "CraftingResultSlotMixin",
+    "EnchantmentHelperMixin",
     "BlockMixin",
-    "ExperienceOrbEntityMixin"
+    "ExperienceOrbEntityMixin",
+    "AbstractFurnaceBlockEntityMixin",
+    "ExperienceBottleEntityMixin",
+    "FishingBobberEntityMixin",
+    "AnimalEntityMixin",
+    "NetherPortalBlockMixin",
+    "EndPortalBlockMixin",
+    "ServerPlayerEntityMixin",
+    "SpawnLocatingMixin",
+    "EntityTrackerEntryMixin",
+    "MinecraftServerMixin",
+    "StructureTemplateMixin",
+    "LootableInventoryMixin",
+    "ChunkGeneratorMixin",
+    "BlockEntityMixin",
+    "ChunkDataMixin",
+    "ChunkDataBlockEntityDataAccessor",
+    "ScreenHandlerMixin",
+    "ItemEntityMixin",
+    "ItemFrameEntityMixin",
+    "FluidBlockMixin"
   ],
   "client": [
-    "client.UseDurationPropertyMixin"
+    "client.UseDurationPropertyMixin",
+    "client.ClientPlayerInteractionManagerMixin"
   ],
   "injectors": {
     "defaultRequire": 1

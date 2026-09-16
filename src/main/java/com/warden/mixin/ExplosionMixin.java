@@ -70,7 +70,7 @@ public abstract class ExplosionMixin {
         float capped = Math.min(power, srcCfg.maxPower);
         if (capped >= power) return;
 
-        WardenMod.LOGGER.info("[Warden] {} explosion capped: {} -> {}", sourceKey, power, capped);
+        WardenMod.LOGGER.debug("[Warden] {} explosion capped: {} -> {}", sourceKey, power, capped);
 
         if (capped <= 0f) {
             ci.cancel();
@@ -118,7 +118,7 @@ public abstract class ExplosionMixin {
         float capped = Math.min(power, srcCfg.maxPower);
         if (capped >= power) return;
 
-        WardenMod.LOGGER.info("[Warden] {} explosion capped: {} -> {}", sourceKey, power, capped);
+        WardenMod.LOGGER.debug("[Warden] {} explosion capped: {} -> {}", sourceKey, power, capped);
 
         if (capped <= 0f) {
             ci.cancel();

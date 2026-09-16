@@ -5,24 +5,27 @@
   "name": "Warden",
   "description": "Configurable limits for explosions, items, weapons, enchantments, and effects.",
   "authors": [
-    "YourNameHere"
+    "Flame"
   ],
   "contact": {
-    "homepage": "https://modrinth.com/mod/warden",
-    "sources": "https://github.com/YourUser/warden",
-    "issues": "https://github.com/YourUser/warden/issues"
+    "homepage": "https://modrinth.com/mod/wardenfabric"
   },
   "license": "MIT",
   "icon": "assets/warden/icon.png",
   "environment": "*",
   "entrypoints": {
     "main": ["com.warden.WardenMod"],
-    "client": ["com.warden.WardenClient"]
+    "client": ["com.warden.WardenClient"],
+    "modmenu": ["com.warden.client.WardenModMenu"]
   },
   "mixins": ["warden.mixins.json"],
   "depends": {
     "fabricloader": ">=0.16.0",
     "fabric-api": "*",
     "minecraft": "~1.21.11"
+  },
+  "suggests": {
+    "yet_another_config_lib_v3": "*",
+    "modmenu": "*"
   }
 }

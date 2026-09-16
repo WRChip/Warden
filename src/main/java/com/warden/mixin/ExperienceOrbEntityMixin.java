@@ -1,6 +1,7 @@
 package com.warden.mixin;
 
 import com.warden.WardenMod;
+import com.warden.xp.ExperienceOrbEntityAccessor;
 import net.minecraft.entity.ExperienceOrbEntity;
 import net.minecraft.entity.player.PlayerEntity;
 import org.spongepowered.asm.mixin.Mixin;
@@ -27,8 +28,9 @@ public abstract class ExperienceOrbEntityMixin implements ExperienceOrbEntityAcc
         this.warden$context = context;
     }
 
-    @Inject(method = "<init>(Lnet/minecraft/world/World;DDDI)V", at = @At("TAIL"))
-    private void warden$tagOrbOnCreation(net.minecraft.world.World world, double x, double y, double z, int amount, CallbackInfo ci) {
+    // the (World,DDDI) constructor and ExperienceOrbEntity.spawn both route through this one
+    @Inject(method = "<init>(Lnet/minecraft/world/World;Lnet/minecraft/util/math/Vec3d;Lnet/minecraft/util/math/Vec3d;I)V", at = @At("TAIL"))
+    private void warden$tagOrbOnCreation(net.minecraft.world.World world, net.minecraft.util.math.Vec3d pos, net.minecraft.util.math.Vec3d velocity, int amount, CallbackInfo ci) {
         this.warden$source = WardenMod.XP_SOURCE.get();
         this.warden$context = WardenMod.XP_CONTEXT.get();
     }

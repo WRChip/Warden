@@ -1,4 +1,4 @@
-package com.warden.mixin;
+package com.warden.xp;
 
 public interface ExperienceOrbEntityAccessor {
     void warden$setXpSource(String source);
