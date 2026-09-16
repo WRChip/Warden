@@ -63,7 +63,8 @@ public abstract class LivingEntityMixin {
             cir.setReturnValue(false);
             APPLYING.set(true);
             try {
-                player.addStatusEffect(new StatusEffectInstance(effectType, newDuration, newAmplifier), source);
+                player.addStatusEffect(new StatusEffectInstance(effectType, newDuration, newAmplifier,
+                        effect.isAmbient(), effect.shouldShowParticles(), effect.shouldShowIcon()), source);
                 WardenMod.sendNotice(player, WardenMod.NoticeCategory.EFFECT,
                         WardenMod.shortId(effectId) + " capped");
             } finally {

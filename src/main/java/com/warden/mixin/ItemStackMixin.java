@@ -14,23 +14,8 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 @Mixin(ItemStack.class)
 public abstract class ItemStackMixin {
 
-    @Inject(method = "<init>(Lnet/minecraft/item/ItemConvertible;)V", at = @At("TAIL"))
-    private void warden$afterInit(ItemConvertible item, CallbackInfo ci) {
-        WardenMod.enforceWeaponComponents((ItemStack) (Object) this);
-    }
-
     @Inject(method = "<init>(Lnet/minecraft/item/ItemConvertible;I)V", at = @At("TAIL"))
     private void warden$afterInit(ItemConvertible item, int count, CallbackInfo ci) {
-        WardenMod.enforceWeaponComponents((ItemStack) (Object) this);
-    }
-
-    @Inject(method = "<init>(Lnet/minecraft/registry/entry/RegistryEntry;)V", at = @At("TAIL"))
-    private void warden$afterInit(RegistryEntry<?> item, CallbackInfo ci) {
-        WardenMod.enforceWeaponComponents((ItemStack) (Object) this);
-    }
-
-    @Inject(method = "<init>(Lnet/minecraft/registry/entry/RegistryEntry;I)V", at = @At("TAIL"))
-    private void warden$afterInit(RegistryEntry<?> item, int count, CallbackInfo ci) {
         WardenMod.enforceWeaponComponents((ItemStack) (Object) this);
     }
 
