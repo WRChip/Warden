@@ -500,7 +500,7 @@ public class WardenCommand {
         return effect;
     }
 
-    private static final List<String> XP_SOURCES = List.of("villager_trading", "entitiesKilling", "blocksMining", "furnace", "fishing", "breeding", "xp_bottle");
+    private static final List<String> XP_SOURCES = List.of("all", "villager_trading", "entitiesKilling", "blocksMining", "furnace", "fishing", "breeding", "xp_bottle");
 
     private static com.mojang.brigadier.builder.LiteralArgumentBuilder<ServerCommandSource> buildXpCommand() {
         var xp = literal("xp").requires(WardenCommand::hasAdminPermission);
@@ -560,7 +560,7 @@ public class WardenCommand {
             com.mojang.brigadier.suggestion.SuggestionsBuilder builder
     ) {
         String source = StringArgumentType.getString(ctx, "source");
-        if ("entitiesKilling".equals(source)) {
+        if ("entitiesKilling".equals(source) || "breeding".equals(source)) {
             return CommandSource.suggestIdentifiers(Registries.ENTITY_TYPE.getIds(), builder);
         } else if ("blocksMining".equals(source)) {
             return CommandSource.suggestIdentifiers(Registries.BLOCK.getIds(), builder);
@@ -1892,7 +1892,7 @@ public class WardenCommand {
                 .append(Text.literal("): ").formatted(Formatting.GOLD));
 
         if (limit == null) {
-            response.append(Text.literal("DISABLED (default)").formatted(Formatting.GRAY));
+            response.append(Text.literal("all".equals(source) || !WardenMod.CONFIG.xpLimits.containsKey("all") ? "NOT SET (no cap)" : "NOT SET (follows all)").formatted(Formatting.GRAY));
         } else if (limit == -1) {
             response.append(Text.literal("UNLIMITED").formatted(Formatting.GREEN));
         } else {
@@ -2391,7 +2391,7 @@ public class WardenCommand {
                 .append(Text.literal("disable/remove ").formatted(Formatting.RED))
                 .append(Text.literal("<src> [for <id>]").formatted(Formatting.YELLOW));
         response.append(Text.literal("\n    Sources: ").formatted(Formatting.LIGHT_PURPLE))
-                .append(Text.literal("villager_trading, entitiesKilling, blocksMining, furnace, fishing, breeding, xp_bottle").formatted(Formatting.WHITE));
+                .append(Text.literal("all, villager_trading, entitiesKilling, blocksMining, furnace, fishing, breeding, xp_bottle").formatted(Formatting.WHITE));
         response.append(Text.literal("\n    Note: ").formatted(Formatting.GOLD))
                 .append(Text.literal("XP limits apply to XP Dropped from sources. Use 'for' with entitiesKilling/blocksMining.").formatted(Formatting.GRAY));
 

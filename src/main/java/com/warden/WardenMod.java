@@ -64,6 +64,8 @@ public class WardenMod implements ModInitializer {
     public static final ThreadLocal<String> XP_CONTEXT = ThreadLocal.withInitial(() -> "");
     public static final ThreadLocal<String> XP_SOURCE_OVERRIDE = new ThreadLocal<>();
     public static final ThreadLocal<String> XP_CONTEXT_OVERRIDE = new ThreadLocal<>();
+    // player responsible for an xp drop, when the drop site knows it; used for exemption and the notice
+    public static final ThreadLocal<ServerPlayerEntity> XP_PLAYER = new ThreadLocal<>();
 
     public enum NoticeCategory {
         ITEM,
