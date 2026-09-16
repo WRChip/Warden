@@ -15,7 +15,9 @@ import net.minecraft.command.permission.Permission;
 import net.minecraft.command.permission.PermissionLevel;
 import net.minecraft.item.Item;
 import net.minecraft.registry.Registries;
+import net.minecraft.registry.RegistryKey;
 import net.minecraft.registry.RegistryKeys;
+import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.command.ServerCommandSource;
 import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.text.MutableText;
@@ -27,6 +29,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.UUID;
 import java.util.Map;
 import java.util.Set;
 
@@ -45,8 +48,10 @@ public class WardenCommand {
             new SimpleCommandExceptionType(wardenPrefix().append(Text.literal("Unknown action bar category").formatted(Formatting.RED)));
     private static final DynamicCommandExceptionType INVALID_WEAPON_STAT_TARGET =
             new DynamicCommandExceptionType(message -> wardenPrefix().append(Text.literal(message.toString()).formatted(Formatting.RED)));
+    private static final DynamicCommandExceptionType PLAYER_NOT_FOUND =
+            new DynamicCommandExceptionType(name -> wardenPrefix().append(Text.literal("Player not found or offline: " + name).formatted(Formatting.RED)));
     private static final List<String> RESET_CATEGORIES = List.of(
-            "explosion", "item", "weapon", "enchant", "effect", "xp", "actionbar", "exempt"
+            "explosion", "item", "weapon", "enchant", "effect", "xp", "dimension", "actionbar", "exempt"
     );
 
     private static final List<String> EXPLOSION_SOURCES = List.of(
@@ -160,6 +165,7 @@ public class WardenCommand {
         var root = literal("warden");
         root.then(literal("reload").requires(WardenCommand::hasAdminPermission).executes(WardenCommand::reload));
         root.then(buildResetCommand());
+        root.then(buildRestoreCommand());
         root.then(literal("status").executes(WardenCommand::status));
         root.then(literal("help").executes(WardenCommand::help));
         root.then(buildActionBarCommand());
@@ -169,9 +175,111 @@ public class WardenCommand {
         root.then(buildEnchantCommand());
         root.then(buildEffectCommand());
         root.then(buildXpCommand());
+        root.then(buildDimensionCommand());
         root.then(buildExemptCommand());
         root.then(buildConfigCommand());
+        root.then(buildFreezeCommand());
+        root.then(buildMuteCommand());
+        root.then(buildVanishCommand());
+        root.then(buildInventoryCommand());
+        root.then(buildEnderChestCommand());
         return root;
+    }
+
+    private static java.util.concurrent.CompletableFuture<com.mojang.brigadier.suggestion.Suggestions> suggestOnlinePlayers(
+            CommandContext<ServerCommandSource> ctx,
+            com.mojang.brigadier.suggestion.SuggestionsBuilder builder
+    ) {
+        return CommandSource.suggestMatching(
+                ctx.getSource().getServer().getPlayerManager().getPlayerList().stream().map(p -> p.getName().getString()).toList(), builder);
+    }
+
+    private static ServerPlayerEntity resolveOnlinePlayer(CommandContext<ServerCommandSource> ctx, String argName)
+            throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        String name = StringArgumentType.getString(ctx, argName);
+        ServerPlayerEntity target = ctx.getSource().getServer().getPlayerManager().getPlayer(name);
+        if (target == null) {
+            throw PLAYER_NOT_FOUND.create(name);
+        }
+        return target;
+    }
+
+    private static com.mojang.brigadier.builder.LiteralArgumentBuilder<ServerCommandSource> buildFreezeCommand() {
+        return literal("freeze").requires(WardenCommand::hasAdminPermission)
+                .then(argument("player", StringArgumentType.word())
+                        .suggests(WardenCommand::suggestOnlinePlayers)
+                        .executes(WardenCommand::freezeToggle));
+    }
+
+    private static com.mojang.brigadier.builder.LiteralArgumentBuilder<ServerCommandSource> buildMuteCommand() {
+        return literal("mute").requires(WardenCommand::hasAdminPermission)
+                .then(argument("player", StringArgumentType.word())
+                        .suggests(WardenCommand::suggestOnlinePlayers)
+                        .executes(WardenCommand::muteToggle));
+    }
+
+    private static com.mojang.brigadier.builder.LiteralArgumentBuilder<ServerCommandSource> buildVanishCommand() {
+        return literal("vanish")
+                .requires(src -> hasAdminPermission(src) && src.getEntity() instanceof ServerPlayerEntity)
+                .executes(WardenCommand::vanishToggle);
+    }
+
+    private static com.mojang.brigadier.builder.LiteralArgumentBuilder<ServerCommandSource> buildInventoryCommand() {
+        return literal("inv").requires(WardenCommand::hasAdminPermission)
+                .then(argument("player", StringArgumentType.word())
+                        .suggests(WardenCommand::suggestOnlinePlayers)
+                        .executes(WardenCommand::openInventory));
+    }
+
+    private static com.mojang.brigadier.builder.LiteralArgumentBuilder<ServerCommandSource> buildEnderChestCommand() {
+        return literal("enderchest").requires(WardenCommand::hasAdminPermission)
+                .then(argument("player", StringArgumentType.word())
+                        .suggests(WardenCommand::suggestOnlinePlayers)
+                        .executes(WardenCommand::openEnderChest));
+    }
+
+    private static int freezeToggle(CommandContext<ServerCommandSource> ctx) throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        ServerPlayerEntity target = resolveOnlinePlayer(ctx, "player");
+        boolean frozen = WardenModeration.toggleFreeze(target);
+        ctx.getSource().sendFeedback(() -> wardenPrefix()
+                .append(Text.literal(target.getName().getString()).formatted(Formatting.AQUA))
+                .append(Text.literal(frozen ? " is now frozen." : " is no longer frozen.").formatted(frozen ? Formatting.RED : Formatting.GREEN)), true);
+        target.sendMessage(wardenPrefix().append(Text.literal(frozen ? "You have been frozen by an admin." : "You have been unfrozen.")
+                .formatted(frozen ? Formatting.RED : Formatting.GREEN)));
+        return 1;
+    }
+
+    private static int muteToggle(CommandContext<ServerCommandSource> ctx) throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        ServerPlayerEntity target = resolveOnlinePlayer(ctx, "player");
+        boolean muted = WardenModeration.toggleMute(target);
+        ctx.getSource().sendFeedback(() -> wardenPrefix()
+                .append(Text.literal(target.getName().getString()).formatted(Formatting.AQUA))
+                .append(Text.literal(muted ? " is now muted." : " is no longer muted.").formatted(muted ? Formatting.RED : Formatting.GREEN)), true);
+        target.sendMessage(wardenPrefix().append(Text.literal(muted ? "You have been muted by an admin." : "You have been unmuted.")
+                .formatted(muted ? Formatting.RED : Formatting.GREEN)));
+        return 1;
+    }
+
+    private static int vanishToggle(CommandContext<ServerCommandSource> ctx) throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        ServerPlayerEntity player = ctx.getSource().getPlayerOrThrow();
+        boolean vanished = WardenModeration.toggleVanish(player);
+        ctx.getSource().sendFeedback(() -> wardenPrefix()
+                .append(Text.literal(vanished ? "Vanish enabled." : "Vanish disabled.").formatted(vanished ? Formatting.GREEN : Formatting.RED)), false);
+        return 1;
+    }
+
+    private static int openInventory(CommandContext<ServerCommandSource> ctx) throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        ServerPlayerEntity moderator = ctx.getSource().getPlayerOrThrow();
+        ServerPlayerEntity target = resolveOnlinePlayer(ctx, "player");
+        WardenModeration.openInventoryView(moderator, target);
+        return 1;
+    }
+
+    private static int openEnderChest(CommandContext<ServerCommandSource> ctx) throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        ServerPlayerEntity moderator = ctx.getSource().getPlayerOrThrow();
+        ServerPlayerEntity target = resolveOnlinePlayer(ctx, "player");
+        WardenModeration.openEnderChestView(moderator, target);
+        return 1;
     }
 
     private static com.mojang.brigadier.builder.LiteralArgumentBuilder<ServerCommandSource> buildResetCommand() {
@@ -180,6 +288,32 @@ public class WardenCommand {
                 .suggests((ctx, builder) -> CommandSource.suggestMatching(RESET_CATEGORIES, builder))
                 .executes(WardenCommand::resetCategory));
         return reset;
+    }
+
+    // /warden restore <countdownSeconds> <endTitle> <pvpDelayMinutes>
+    // endTitle needs quotes if it has spaces, since it sits between two numeric arguments.
+    private static com.mojang.brigadier.builder.LiteralArgumentBuilder<ServerCommandSource> buildRestoreCommand() {
+        return literal("restore").requires(WardenCommand::hasAdminPermission)
+                .then(argument("countdownSeconds", IntegerArgumentType.integer(0))
+                        .then(argument("endTitle", StringArgumentType.string())
+                                .then(argument("pvpDelayMinutes", IntegerArgumentType.integer(0))
+                                        .executes(WardenCommand::restore))));
+    }
+
+    private static int restore(CommandContext<ServerCommandSource> ctx) {
+        if (WardenRestore.isActive()) {
+            ctx.getSource().sendFeedback(() -> wardenPrefix().append(Text.literal("A restore is already in progress.").formatted(Formatting.RED)), false);
+            return 0;
+        }
+        int countdownSeconds = IntegerArgumentType.getInteger(ctx, "countdownSeconds");
+        String endTitle = StringArgumentType.getString(ctx, "endTitle");
+        int pvpDelayMinutes = IntegerArgumentType.getInteger(ctx, "pvpDelayMinutes");
+        WardenRestore.start(ctx.getSource().getServer(), countdownSeconds,
+                Text.literal(endTitle).formatted(Formatting.GREEN, Formatting.BOLD), pvpDelayMinutes);
+        ctx.getSource().sendFeedback(() -> wardenPrefix().append(Text.literal(
+                "Restore started: " + countdownSeconds + "s countdown, PVP enables in " + pvpDelayMinutes + " min.")
+                .formatted(Formatting.GREEN)), true);
+        return 1;
     }
 
     private static com.mojang.brigadier.builder.LiteralArgumentBuilder<ServerCommandSource> buildActionBarCommand() {
@@ -365,7 +499,7 @@ public class WardenCommand {
         return effect;
     }
 
-    private static final List<String> XP_SOURCES = List.of("villager_trading", "entitiesKilling", "blocksMining");
+    private static final List<String> XP_SOURCES = List.of("villager_trading", "entitiesKilling", "blocksMining", "furnace", "fishing", "breeding", "xp_bottle");
 
     private static com.mojang.brigadier.builder.LiteralArgumentBuilder<ServerCommandSource> buildXpCommand() {
         var xp = literal("xp").requires(WardenCommand::hasAdminPermission);
@@ -433,6 +567,21 @@ public class WardenCommand {
         return builder.buildFuture();
     }
 
+    private static com.mojang.brigadier.builder.LiteralArgumentBuilder<ServerCommandSource> buildDimensionCommand() {
+        var dimension = literal("dimension").requires(WardenCommand::hasAdminPermission);
+        dimension.then(literal("status").executes(WardenCommand::statusDimension));
+        dimension.then(literal("block")
+                .then(argument("dimension", StringArgumentType.string())
+                        .suggests((ctx, builder) -> CommandSource.suggestIdentifiers(
+                                ctx.getSource().getServer().getWorldRegistryKeys().stream().map(RegistryKey::getValue), builder))
+                        .executes(WardenCommand::dimensionBlock)));
+        dimension.then(literal("unblock")
+                .then(argument("dimension", StringArgumentType.string())
+                        .suggests((ctx, builder) -> CommandSource.suggestMatching(WardenMod.CONFIG.blockedDimensions, builder))
+                        .executes(WardenCommand::dimensionUnblock)));
+        return dimension;
+    }
+
     private static com.mojang.brigadier.builder.LiteralArgumentBuilder<ServerCommandSource> buildExemptCommand() {
         var exempt = literal("exempt").requires(WardenCommand::hasAdminPermission);
         exempt.then(literal("status").executes(WardenCommand::statusExempt));
@@ -444,7 +593,8 @@ public class WardenCommand {
                         .executes(WardenCommand::exemptAdd)));
         exempt.then(literal("remove")
                 .then(argument("player", StringArgumentType.word())
-                        .suggests((ctx, builder) -> CommandSource.suggestMatching(WardenMod.CONFIG.exemptPlayers, builder))
+                        .suggests((ctx, builder) -> CommandSource.suggestMatching(
+                                WardenMod.CONFIG.exemptPlayers.stream().map(e -> exemptDisplayName(ctx.getSource().getServer(), e)).toList(), builder))
                         .executes(WardenCommand::exemptRemove)));
         return exempt;
     }
@@ -466,6 +616,33 @@ public class WardenCommand {
         config.then(literal("effectLimitsEnabled")
                 .executes(ctx -> configShow(ctx, "effectLimitsEnabled", String.valueOf(WardenMod.CONFIG.effectLimitsEnabled)))
                 .then(argument("value", BoolArgumentType.bool()).executes(WardenCommand::configEffectLimitsEnabled)));
+        config.then(literal("dimensionLimitsEnabled")
+                .executes(ctx -> configShow(ctx, "dimensionLimitsEnabled", String.valueOf(WardenMod.CONFIG.dimensionLimitsEnabled)))
+                .then(argument("value", BoolArgumentType.bool()).executes(WardenCommand::configDimensionLimitsEnabled)));
+        config.then(literal("antiSeedCrackEnabled")
+                .executes(ctx -> configShow(ctx, "antiSeedCrackEnabled", String.valueOf(WardenMod.CONFIG.antiSeedCrackEnabled)))
+                .then(argument("value", BoolArgumentType.bool()).executes(WardenCommand::configAntiSeedCrackEnabled)));
+        config.then(literal("chunkBanEnabled")
+                .executes(ctx -> configShow(ctx, "chunkBanEnabled", String.valueOf(WardenMod.CONFIG.chunkBanEnabled)))
+                .then(argument("value", BoolArgumentType.bool()).executes(ctx -> configSetBool(ctx, "chunkBanEnabled", v -> WardenMod.CONFIG.chunkBanEnabled = v))));
+        config.then(literal("maxItemBytes")
+                .executes(ctx -> configShow(ctx, "maxItemBytes", String.valueOf(WardenMod.CONFIG.maxItemBytes)))
+                .then(argument("value", IntegerArgumentType.integer(1024)).executes(ctx -> configSetInt(ctx, "maxItemBytes", v -> WardenMod.CONFIG.maxItemBytes = v))));
+        config.then(literal("maxBlockEntityBytes")
+                .executes(ctx -> configShow(ctx, "maxBlockEntityBytes", String.valueOf(WardenMod.CONFIG.maxBlockEntityBytes)))
+                .then(argument("value", IntegerArgumentType.integer(1024)).executes(ctx -> configSetInt(ctx, "maxBlockEntityBytes", v -> WardenMod.CONFIG.maxBlockEntityBytes = v))));
+        config.then(literal("maxChunkBlockEntityBytes")
+                .executes(ctx -> configShow(ctx, "maxChunkBlockEntityBytes", String.valueOf(WardenMod.CONFIG.maxChunkBlockEntityBytes)))
+                .then(argument("value", IntegerArgumentType.integer(65536)).executes(ctx -> configSetInt(ctx, "maxChunkBlockEntityBytes", v -> WardenMod.CONFIG.maxChunkBlockEntityBytes = v))));
+        config.then(literal("bucketDrainEnabled")
+                .executes(ctx -> configShow(ctx, "bucketDrainEnabled", String.valueOf(WardenMod.CONFIG.bucketDrainEnabled)))
+                .then(argument("value", BoolArgumentType.bool()).executes(ctx -> configSetBool(ctx, "bucketDrainEnabled", v -> WardenMod.CONFIG.bucketDrainEnabled = v))));
+        config.then(literal("maxBucketDrains")
+                .executes(ctx -> configShow(ctx, "maxBucketDrains", String.valueOf(WardenMod.CONFIG.maxBucketDrains)))
+                .then(argument("value", IntegerArgumentType.integer(1)).executes(ctx -> configSetInt(ctx, "maxBucketDrains", v -> WardenMod.CONFIG.maxBucketDrains = v))));
+        config.then(literal("bucketDrainWindowTicks")
+                .executes(ctx -> configShow(ctx, "bucketDrainWindowTicks", String.valueOf(WardenMod.CONFIG.bucketDrainWindowTicks)))
+                .then(argument("value", IntegerArgumentType.integer(20)).executes(ctx -> configSetInt(ctx, "bucketDrainWindowTicks", v -> WardenMod.CONFIG.bucketDrainWindowTicks = v))));
         config.then(literal("checkIntervalTicks")
                 .executes(ctx -> configShow(ctx, "checkIntervalTicks", String.valueOf(WardenMod.CONFIG.checkIntervalTicks)))
                 .then(argument("value", IntegerArgumentType.integer(1)).executes(WardenCommand::configCheckIntervalTicks)));
@@ -511,10 +688,9 @@ public class WardenCommand {
 
     private static int actionBarStatus(CommandContext<ServerCommandSource> ctx) throws com.mojang.brigadier.exceptions.CommandSyntaxException {
         var player = ctx.getSource().getPlayerOrThrow();
-        String playerName = player.getName().getString();
         MutableText response = wardenPrefix().append(Text.literal("Action bar notice preferences:").formatted(Formatting.GOLD));
         for (String category : ACTION_BAR_CATEGORIES) {
-            boolean enabled = isActionBarEnabledForPlayer(playerName, category);
+            boolean enabled = isActionBarEnabledForPlayer(player, category);
             response.append(Text.literal("\n  ").formatted(Formatting.GRAY))
                     .append(Text.literal(category).formatted(Formatting.YELLOW))
                     .append(Text.literal(" = ").formatted(Formatting.GRAY))
@@ -527,7 +703,7 @@ public class WardenCommand {
     private static int actionBarCategoryStatus(CommandContext<ServerCommandSource> ctx) throws com.mojang.brigadier.exceptions.CommandSyntaxException {
         var player = ctx.getSource().getPlayerOrThrow();
         String category = getActionBarCategory(ctx);
-        boolean enabled = isActionBarEnabledForPlayer(player.getName().getString(), category);
+        boolean enabled = isActionBarEnabledForPlayer(player, category);
         ctx.getSource().sendFeedback(() -> wardenPrefix()
                 .append(Text.literal("actionbar.").formatted(Formatting.GRAY))
                 .append(Text.literal(category).formatted(Formatting.YELLOW))
@@ -539,13 +715,19 @@ public class WardenCommand {
     private static int actionBarSet(CommandContext<ServerCommandSource> ctx) throws com.mojang.brigadier.exceptions.CommandSyntaxException {
         var player = ctx.getSource().getPlayerOrThrow();
         String playerName = player.getName().getString();
+        String key = player.getUuidAsString();
         String category = getActionBarCategory(ctx);
         boolean value = BoolArgumentType.getBool(ctx, "value");
-        Set<String> disabled = WardenMod.CONFIG.playerActionBarDisabled.computeIfAbsent(playerName, k -> new LinkedHashSet<>());
+        // older configs stored these by name; fold that entry into the uuid one
+        Set<String> legacy = WardenMod.CONFIG.playerActionBarDisabled.remove(playerName);
+        Set<String> disabled = WardenMod.CONFIG.playerActionBarDisabled.computeIfAbsent(key, k -> new LinkedHashSet<>());
+        if (legacy != null) {
+            disabled.addAll(legacy);
+        }
         if (value) {
             disabled.remove(category);
             if (disabled.isEmpty()) {
-                WardenMod.CONFIG.playerActionBarDisabled.remove(playerName);
+                WardenMod.CONFIG.playerActionBarDisabled.remove(key);
             }
         } else {
             disabled.add(category);
@@ -570,8 +752,11 @@ public class WardenCommand {
         return category;
     }
 
-    private static boolean isActionBarEnabledForPlayer(String playerName, String category) {
-        Set<String> disabled = WardenMod.CONFIG.playerActionBarDisabled.get(playerName);
+    private static boolean isActionBarEnabledForPlayer(ServerPlayerEntity player, String category) {
+        Set<String> disabled = WardenMod.CONFIG.playerActionBarDisabled.get(player.getUuidAsString());
+        if (disabled == null) {
+            disabled = WardenMod.CONFIG.playerActionBarDisabled.get(player.getName().getString());
+        }
         return disabled == null || !disabled.contains(category);
     }
 
@@ -588,6 +773,8 @@ public class WardenCommand {
                 .append(Text.literal(cfg.enchantmentLimitsEnabled ? "ENABLED" : "DISABLED").formatted(cfg.enchantmentLimitsEnabled ? Formatting.GREEN : Formatting.RED));
         response.append(Text.literal("\n  effect limits: ").formatted(Formatting.GRAY))
                 .append(Text.literal(cfg.effectLimitsEnabled ? "ENABLED" : "DISABLED").formatted(cfg.effectLimitsEnabled ? Formatting.GREEN : Formatting.RED));
+        response.append(Text.literal("\n  dimension limits: ").formatted(Formatting.GRAY))
+                .append(Text.literal(cfg.dimensionLimitsEnabled ? "ENABLED" : "DISABLED").formatted(cfg.dimensionLimitsEnabled ? Formatting.GREEN : Formatting.RED));
 
         ctx.getSource().sendFeedback(() -> response, false);
         return 1;
@@ -1748,6 +1935,8 @@ public class WardenCommand {
                 .append(Text.literal(String.valueOf(cfg.enchantmentLimitsEnabled)).formatted(cfg.enchantmentLimitsEnabled ? Formatting.GREEN : Formatting.RED));
         response.append(Text.literal("\n  effectLimitsEnabled = ").formatted(Formatting.GRAY))
                 .append(Text.literal(String.valueOf(cfg.effectLimitsEnabled)).formatted(cfg.effectLimitsEnabled ? Formatting.GREEN : Formatting.RED));
+        response.append(Text.literal("\n  dimensionLimitsEnabled = ").formatted(Formatting.GRAY))
+                .append(Text.literal(String.valueOf(cfg.dimensionLimitsEnabled)).formatted(cfg.dimensionLimitsEnabled ? Formatting.GREEN : Formatting.RED));
         response.append(Text.literal("\n  itemActionBarEnabled = ").formatted(Formatting.GRAY))
                 .append(Text.literal(String.valueOf(cfg.itemActionBarEnabled)).formatted(cfg.itemActionBarEnabled ? Formatting.GREEN : Formatting.RED));
         response.append(Text.literal("\n  weaponActionBarEnabled = ").formatted(Formatting.GRAY))
@@ -1764,6 +1953,22 @@ public class WardenCommand {
                 .append(Text.literal(String.valueOf(cfg.deleteOverflowItem)).formatted(cfg.deleteOverflowItem ? Formatting.GREEN : Formatting.RED));
         response.append(Text.literal("\n  exemptCreative = ").formatted(Formatting.GRAY))
                 .append(Text.literal(String.valueOf(cfg.exemptCreative)).formatted(cfg.exemptCreative ? Formatting.GREEN : Formatting.RED));
+        response.append(Text.literal("\n  antiSeedCrackEnabled = ").formatted(Formatting.GRAY))
+                .append(Text.literal(String.valueOf(cfg.antiSeedCrackEnabled)).formatted(cfg.antiSeedCrackEnabled ? Formatting.GREEN : Formatting.RED));
+        response.append(Text.literal("\n  chunkBanEnabled = ").formatted(Formatting.GRAY))
+                .append(Text.literal(String.valueOf(cfg.chunkBanEnabled)).formatted(cfg.chunkBanEnabled ? Formatting.GREEN : Formatting.RED));
+        response.append(Text.literal("\n  maxItemBytes = ").formatted(Formatting.GRAY))
+                .append(Text.literal(String.valueOf(cfg.maxItemBytes)).formatted(Formatting.AQUA));
+        response.append(Text.literal("\n  maxBlockEntityBytes = ").formatted(Formatting.GRAY))
+                .append(Text.literal(String.valueOf(cfg.maxBlockEntityBytes)).formatted(Formatting.AQUA));
+        response.append(Text.literal("\n  maxChunkBlockEntityBytes = ").formatted(Formatting.GRAY))
+                .append(Text.literal(String.valueOf(cfg.maxChunkBlockEntityBytes)).formatted(Formatting.AQUA));
+        response.append(Text.literal("\n  bucketDrainEnabled = ").formatted(Formatting.GRAY))
+                .append(Text.literal(String.valueOf(cfg.bucketDrainEnabled)).formatted(cfg.bucketDrainEnabled ? Formatting.GREEN : Formatting.RED));
+        response.append(Text.literal("\n  maxBucketDrains = ").formatted(Formatting.GRAY))
+                .append(Text.literal(String.valueOf(cfg.maxBucketDrains)).formatted(Formatting.AQUA));
+        response.append(Text.literal("\n  bucketDrainWindowTicks = ").formatted(Formatting.GRAY))
+                .append(Text.literal(String.valueOf(cfg.bucketDrainWindowTicks)).formatted(Formatting.AQUA));
 
         ctx.getSource().sendFeedback(() -> response, false);
         return 1;
@@ -1890,6 +2095,103 @@ public class WardenCommand {
         return 1;
     }
 
+    private static int configSetBool(CommandContext<ServerCommandSource> ctx, String key, java.util.function.Consumer<Boolean> setter) {
+        boolean value = BoolArgumentType.getBool(ctx, "value");
+        setter.accept(value);
+        WardenMod.CONFIG.save();
+        ctx.getSource().sendFeedback(() -> wardenPrefix()
+                .append(Text.literal(key + " = ").formatted(Formatting.GRAY))
+                .append(Text.literal(String.valueOf(value)).formatted(value ? Formatting.GREEN : Formatting.RED)), true);
+        return 1;
+    }
+
+    private static int configSetInt(CommandContext<ServerCommandSource> ctx, String key, java.util.function.IntConsumer setter) {
+        int value = IntegerArgumentType.getInteger(ctx, "value");
+        setter.accept(value);
+        WardenMod.CONFIG.save();
+        ctx.getSource().sendFeedback(() -> wardenPrefix()
+                .append(Text.literal(key + " = ").formatted(Formatting.GRAY))
+                .append(Text.literal(String.valueOf(value)).formatted(Formatting.AQUA)), true);
+        return 1;
+    }
+
+    private static int configAntiSeedCrackEnabled(CommandContext<ServerCommandSource> ctx) {
+        boolean value = BoolArgumentType.getBool(ctx, "value");
+        WardenMod.CONFIG.antiSeedCrackEnabled = value;
+        WardenMod.CONFIG.save();
+        ctx.getSource().sendFeedback(() -> wardenPrefix()
+                .append(Text.literal("antiSeedCrackEnabled = ").formatted(Formatting.GRAY))
+                .append(Text.literal(String.valueOf(value)).formatted(value ? Formatting.GREEN : Formatting.RED)), true);
+        return 1;
+    }
+
+    private static int configDimensionLimitsEnabled(CommandContext<ServerCommandSource> ctx) {
+        boolean value = BoolArgumentType.getBool(ctx, "value");
+        WardenMod.CONFIG.dimensionLimitsEnabled = value;
+        WardenMod.CONFIG.save();
+        ctx.getSource().sendFeedback(() -> wardenPrefix()
+                .append(Text.literal("dimensionLimitsEnabled = ").formatted(Formatting.GRAY))
+                .append(Text.literal(String.valueOf(value)).formatted(value ? Formatting.GREEN : Formatting.RED)), true);
+        return 1;
+    }
+
+    private static int statusDimension(CommandContext<ServerCommandSource> ctx) {
+        WardenConfig cfg = WardenMod.CONFIG;
+        MutableText response = wardenPrefix().append(Text.literal("Dimension limits (").formatted(Formatting.GRAY))
+                .append(Text.literal(cfg.dimensionLimitsEnabled ? "ENABLED" : "DISABLED").formatted(cfg.dimensionLimitsEnabled ? Formatting.GREEN : Formatting.RED))
+                .append(Text.literal("):").formatted(Formatting.GRAY));
+        if (cfg.blockedDimensions.isEmpty()) {
+            response.append(Text.literal("\n  (none blocked)").formatted(Formatting.DARK_GRAY));
+        } else {
+            for (String d : cfg.blockedDimensions) {
+                response.append(Text.literal("\n  ").formatted(Formatting.GRAY))
+                        .append(Text.literal(d).formatted(Formatting.YELLOW))
+                        .append(Text.literal(": blocked").formatted(Formatting.RED));
+            }
+        }
+        ctx.getSource().sendFeedback(() -> response, false);
+        return 1;
+    }
+
+    // "nether" / "end" are what people actually type
+    private static String dimensionId(String raw) {
+        String id = switch (raw) {
+            case "nether" -> "the_nether";
+            case "end" -> "the_end";
+            default -> raw;
+        };
+        Identifier ident = Identifier.tryParse(id);
+        return ident == null ? null : ident.toString();
+    }
+
+    private static int dimensionBlock(CommandContext<ServerCommandSource> ctx) {
+        String id = dimensionId(StringArgumentType.getString(ctx, "dimension"));
+        if (id == null) {
+            ctx.getSource().sendError(wardenPrefix().append(Text.literal("Invalid dimension id").formatted(Formatting.RED)));
+            return 0;
+        }
+        WardenMod.CONFIG.blockedDimensions.add(id);
+        WardenMod.CONFIG.save();
+        ctx.getSource().sendFeedback(() -> wardenPrefix()
+                .append(Text.literal("dimension.").formatted(Formatting.GRAY))
+                .append(Text.literal(id).formatted(Formatting.YELLOW))
+                .append(Text.literal(" blocked").formatted(Formatting.RED)), true);
+        return 1;
+    }
+
+    private static int dimensionUnblock(CommandContext<ServerCommandSource> ctx) {
+        String raw = StringArgumentType.getString(ctx, "dimension");
+        String id = dimensionId(raw);
+        boolean had = WardenMod.CONFIG.blockedDimensions.remove(raw)
+                | (id != null && WardenMod.CONFIG.blockedDimensions.remove(id));
+        WardenMod.CONFIG.save();
+        ctx.getSource().sendFeedback(() -> wardenPrefix()
+                .append(Text.literal("dimension.").formatted(Formatting.GRAY))
+                .append(Text.literal(id != null ? id : raw).formatted(Formatting.YELLOW))
+                .append(Text.literal(had ? " unblocked" : " was not blocked").formatted(Formatting.GRAY)), true);
+        return 1;
+    }
+
     private static int configExemptCreative(CommandContext<ServerCommandSource> ctx) {
         boolean value = BoolArgumentType.getBool(ctx, "value");
         WardenMod.CONFIG.exemptCreative = value;
@@ -1914,16 +2216,32 @@ public class WardenCommand {
         } else {
             for (String p : cfg.exemptPlayers) {
                 response.append(Text.literal("\n    ").formatted(Formatting.GRAY))
-                        .append(Text.literal(p).formatted(Formatting.YELLOW));
+                        .append(Text.literal(exemptDisplayName(ctx.getSource().getServer(), p)).formatted(Formatting.YELLOW));
             }
         }
         ctx.getSource().sendFeedback(() -> response, false);
         return 1;
     }
 
+    // exempt entries are uuids when the player was online at the time (survives name changes),
+    // plain names otherwise
+    private static String exemptKey(MinecraftServer server, String nameOrUuid) {
+        ServerPlayerEntity online = server.getPlayerManager().getPlayer(nameOrUuid);
+        return online != null ? online.getUuidAsString() : nameOrUuid;
+    }
+
+    private static String exemptDisplayName(MinecraftServer server, String entry) {
+        try {
+            ServerPlayerEntity online = server.getPlayerManager().getPlayer(UUID.fromString(entry));
+            return online != null ? online.getName().getString() : entry;
+        } catch (IllegalArgumentException notAUuid) {
+            return entry;
+        }
+    }
+
     private static int exemptAdd(CommandContext<ServerCommandSource> ctx) {
         String player = StringArgumentType.getString(ctx, "player");
-        WardenMod.CONFIG.exemptPlayers.add(player);
+        WardenMod.CONFIG.exemptPlayers.add(exemptKey(ctx.getSource().getServer(), player));
         WardenMod.CONFIG.save();
         ctx.getSource().sendFeedback(() -> wardenPrefix()
                 .append(Text.literal("Exempted: ").formatted(Formatting.GRAY))
@@ -1933,7 +2251,8 @@ public class WardenCommand {
 
     private static int exemptRemove(CommandContext<ServerCommandSource> ctx) {
         String player = StringArgumentType.getString(ctx, "player");
-        boolean had = WardenMod.CONFIG.exemptPlayers.remove(player);
+        boolean had = WardenMod.CONFIG.exemptPlayers.remove(player)
+                | WardenMod.CONFIG.exemptPlayers.remove(exemptKey(ctx.getSource().getServer(), player));
         WardenMod.CONFIG.save();
         ctx.getSource().sendFeedback(() -> wardenPrefix()
                 .append(Text.literal(player).formatted(Formatting.AQUA))
@@ -1951,7 +2270,11 @@ public class WardenCommand {
                 .append(Text.literal("reset ").formatted(Formatting.WHITE))
                 .append(Text.literal("[<category>]").formatted(Formatting.YELLOW));
         response.append(Text.literal("\n    Categories: ").formatted(Formatting.LIGHT_PURPLE))
-                .append(Text.literal("explosion, item, weapon, enchant, effect, xp, actionbar, exempt").formatted(Formatting.WHITE));
+                .append(Text.literal("explosion, item, weapon, enchant, effect, xp, dimension, actionbar, exempt").formatted(Formatting.WHITE));
+
+        response.append(Text.literal("\n  /warden ").formatted(Formatting.AQUA))
+                .append(Text.literal("restore ").formatted(Formatting.WHITE))
+                .append(Text.literal("<countdownSeconds> <\"endTitle\"> <pvpDelayMinutes>").formatted(Formatting.YELLOW));
 
         response.append(Text.literal("\n  /warden ").formatted(Formatting.AQUA))
                 .append(Text.literal("explosion ").formatted(Formatting.WHITE))
@@ -2031,9 +2354,17 @@ public class WardenCommand {
                 .append(Text.literal("disable/remove ").formatted(Formatting.RED))
                 .append(Text.literal("<src> [for <id>]").formatted(Formatting.YELLOW));
         response.append(Text.literal("\n    Sources: ").formatted(Formatting.LIGHT_PURPLE))
-                .append(Text.literal("villager_trading, entitiesKilling, blocksMining").formatted(Formatting.WHITE));
+                .append(Text.literal("villager_trading, entitiesKilling, blocksMining, furnace, fishing, breeding, xp_bottle").formatted(Formatting.WHITE));
         response.append(Text.literal("\n    Note: ").formatted(Formatting.GOLD))
                 .append(Text.literal("XP limits apply to XP Dropped from sources. Use 'for' with entitiesKilling/blocksMining.").formatted(Formatting.GRAY));
+
+        response.append(Text.literal("\n  /warden ").formatted(Formatting.AQUA))
+                .append(Text.literal("dimension ").formatted(Formatting.WHITE))
+                .append(Text.literal("status").formatted(Formatting.GREEN));
+        response.append(Text.literal("\n  /warden ").formatted(Formatting.AQUA))
+                .append(Text.literal("dimension ").formatted(Formatting.WHITE))
+                .append(Text.literal("block/unblock ").formatted(Formatting.GREEN))
+                .append(Text.literal("<nether|end|id>").formatted(Formatting.YELLOW));
 
         response.append(Text.literal("\n  /warden ").formatted(Formatting.AQUA))
                 .append(Text.literal("actionbar ").formatted(Formatting.WHITE))
@@ -2053,6 +2384,17 @@ public class WardenCommand {
         response.append(Text.literal("\n  /warden ").formatted(Formatting.AQUA))
                 .append(Text.literal("config ").formatted(Formatting.WHITE))
                 .append(Text.literal("<key> <value>").formatted(Formatting.YELLOW));
+
+        response.append(Text.literal("\n  /warden ").formatted(Formatting.AQUA))
+                .append(Text.literal("freeze/mute ").formatted(Formatting.GREEN))
+                .append(Text.literal("<player>").formatted(Formatting.YELLOW))
+                .append(Text.literal(" (toggle)").formatted(Formatting.GRAY));
+        response.append(Text.literal("\n  /warden ").formatted(Formatting.AQUA))
+                .append(Text.literal("vanish").formatted(Formatting.GREEN))
+                .append(Text.literal(" (toggle, self)").formatted(Formatting.GRAY));
+        response.append(Text.literal("\n  /warden ").formatted(Formatting.AQUA))
+                .append(Text.literal("inv/enderchest ").formatted(Formatting.GREEN))
+                .append(Text.literal("<player>").formatted(Formatting.YELLOW));
 
         ctx.getSource().sendFeedback(() -> response, false);
         return 1;

@@ -6,6 +6,9 @@ import com.google.gson.JsonParser;
 import com.warden.config.WardenConfig;
 import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
+import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
+import net.fabricmc.fabric.api.networking.v1.ServerPlayConnectionEvents;
+import net.minecraft.component.ComponentMap;
 import net.minecraft.component.DataComponentTypes;
 import net.minecraft.component.type.AttackRangeComponent;
 import net.minecraft.component.type.AttributeModifierSlot;
@@ -14,6 +17,7 @@ import net.minecraft.component.type.BundleContentsComponent;
 import net.minecraft.component.type.ContainerComponent;
 import net.minecraft.component.type.ItemEnchantmentsComponent;
 import net.minecraft.enchantment.Enchantment;
+import net.minecraft.entity.Entity;
 import net.minecraft.entity.ItemEntity;
 import net.minecraft.entity.attribute.EntityAttributeModifier;
 import net.minecraft.entity.attribute.EntityAttributes;
@@ -23,15 +27,22 @@ import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.entity.player.PlayerInventory;
 import net.minecraft.entity.projectile.PersistentProjectileEntity;
 import net.minecraft.item.Item;
+import net.minecraft.inventory.Inventory;
+import io.netty.buffer.Unpooled;
 import net.minecraft.item.ItemStack;
-import net.minecraft.util.collection.DefaultedList;
+import net.minecraft.network.RegistryByteBuf;
+import net.minecraft.registry.DynamicRegistryManager;
+import net.minecraft.screen.ScreenHandler;
+import net.minecraft.screen.slot.Slot;
 import net.minecraft.registry.Registries;
+import net.minecraft.registry.RegistryKey;
 import net.minecraft.registry.entry.RegistryEntry;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.text.MutableText;
 import net.minecraft.text.Text;
 import net.minecraft.util.Formatting;
+import net.minecraft.world.World;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -40,6 +51,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
 public class WardenMod implements ModInitializer {
@@ -58,7 +70,9 @@ public class WardenMod implements ModInitializer {
         WEAPON,
         ENCHANTMENT,
         EFFECT,
-        XP
+        XP,
+        DIMENSION,
+        BUCKET
     }
 
     public static final Logger LOGGER = LoggerFactory.getLogger("Warden");
@@ -66,6 +80,27 @@ public class WardenMod implements ModInitializer {
     private static final Map<String, WardenConfig.WeaponLimitConfig> CLIENT_SYNCED_WEAPON_LIMITS = new ConcurrentHashMap<>();
     private static volatile boolean CLIENT_SYNCED_WEAPON_LIMITS_VALID;
     private static volatile boolean CLIENT_SYNCED_WEAPON_LIMITS_ENABLED = true;
+    private static final Map<UUID, Integer> LAST_PICKUP_NOTICE = new HashMap<>();
+    private record LastNotice(String message, int tick) {}
+    // set once the server has its registries; item encoding needs them
+    public static volatile DynamicRegistryManager REGISTRIES;
+    private static final Map<String, Long> LAST_OVERSIZE_LOG = new ConcurrentHashMap<>();
+    private record DrainWindow(int startTick, int count) {}
+    private static final Map<UUID, DrainWindow> BUCKET_DRAINS = new ConcurrentHashMap<>();
+
+    /** Returns true once the player has gone over the limit for the current window. */
+    public static boolean registerBucketDrain(ServerPlayerEntity player) {
+        int now = player.age;
+        UUID id = player.getUuid();
+        DrainWindow window = BUCKET_DRAINS.compute(id, (k, prev) -> {
+            if (prev == null || now - prev.startTick() > CONFIG.bucketDrainWindowTicks) {
+                return new DrainWindow(now, 1);
+            }
+            return new DrainWindow(prev.startTick(), prev.count() + 1);
+        });
+        return window.count() > CONFIG.maxBucketDrains;
+    }
+    private static final Map<UUID, LastNotice> LAST_NOTICE = new HashMap<>();
 
     @Override
     public void onInitialize() {
@@ -77,14 +112,41 @@ public class WardenMod implements ModInitializer {
         WardenNetworking.register();
         registerTick();
         WardenCommand.register();
+        // dev aid: a "warden-audit" file in the run dir force-loads mixin targets that only load
+        // when a player joins, so a broken injection shows in the log without needing a client
+        if (java.nio.file.Files.exists(java.nio.file.Path.of("warden-audit"))
+                && net.fabricmc.loader.api.FabricLoader.getInstance().isDevelopmentEnvironment()) {
+            LOGGER.info("[Warden] audit: force-loading mixin targets");
+            for (String target : new String[] {
+                    "net.minecraft.network.packet.s2c.play.ChunkData",
+                    "net.minecraft.network.packet.s2c.play.ChunkData$BlockEntityData"}) {
+                try {
+                    Class.forName(target);
+                } catch (ClassNotFoundException e) {
+                    LOGGER.error("[Warden] audit: {} not found", target);
+                }
+            }
+        }
+        WardenNewWorldWatcher.register();
+        WardenRestore.register();
+        WardenModeration.register();
     }
 
     private void registerTick() {
+        ServerPlayConnectionEvents.DISCONNECT.register((handler, server) -> {
+            LAST_PICKUP_NOTICE.remove(handler.player.getUuid());
+            LAST_NOTICE.remove(handler.player.getUuid());
+        });
+        ServerLifecycleEvents.SERVER_STOPPED.register(server -> {
+            LAST_PICKUP_NOTICE.clear();
+            LAST_NOTICE.clear();
+        });
         ServerTickEvents.END_SERVER_TICK.register((MinecraftServer server) -> {
-            if (server.getTicks() % CONFIG.checkIntervalTicks != 0) {
+            if (server.getTicks() % Math.max(1, CONFIG.checkIntervalTicks) != 0) {
                 return;
             }
             for (ServerPlayerEntity player : server.getPlayerManager().getPlayerList()) {
+                enforceChunkBan(player);
                 enforceItemLimits(player);
                 enforceWeaponLimits(player);
                 enforceEnchantmentLimits(player);
@@ -97,14 +159,15 @@ public class WardenMod implements ModInitializer {
         if (CONFIG.exemptCreative && player.isCreative()) {
             return true;
         }
-        return CONFIG.exemptPlayers.contains(player.getName().getString());
+        return !CONFIG.exemptPlayers.isEmpty() && (CONFIG.exemptPlayers.contains(player.getName().getString())
+                || CONFIG.exemptPlayers.contains(player.getUuidAsString()));
     }
 
     public static String shortId(String id) {
         return id.startsWith("minecraft:") ? id.substring("minecraft:".length()) : id;
     }
 
-    private static MutableText wardenPrefix() {
+    static MutableText wardenPrefix() {
         return Text.literal("[")
                 .append(Text.literal("WARDEN").formatted(Formatting.DARK_PURPLE, Formatting.BOLD))
                 .append(Text.literal("] "));
@@ -120,16 +183,30 @@ public class WardenMod implements ModInitializer {
             case ENCHANTMENT -> CONFIG.enchantmentActionBarEnabled;
             case EFFECT -> CONFIG.effectActionBarEnabled;
             case XP -> true;
+            case DIMENSION -> true;
+            case BUCKET -> true;
         };
         if (!enabledGlobally) {
             return;
         }
-        String playerName = player.getName().getString();
-        java.util.Set<String> disabled = CONFIG.playerActionBarDisabled.get(playerName);
-        if (disabled == null || !disabled.contains(noticeCategoryKey(category))) {
-            MutableText feedback = wardenPrefix().append(Text.literal(message).formatted(Formatting.RED));
-            player.sendMessage(feedback, true);
+        if (!isActionBarEnabledFor(player, category)) {
+            return;
         }
+        // beacons and auras re-apply every few seconds; don't repeat the same line
+        LastNotice last = LAST_NOTICE.get(player.getUuid());
+        if (last != null && last.message.equals(message) && player.age - last.tick < 100) {
+            return;
+        }
+        LAST_NOTICE.put(player.getUuid(), new LastNotice(message, player.age));
+        player.sendMessage(wardenPrefix().append(Text.literal(message).formatted(Formatting.RED)), true);
+    }
+
+    public static boolean isActionBarEnabledFor(PlayerEntity player, NoticeCategory category) {
+        java.util.Set<String> disabled = CONFIG.playerActionBarDisabled.get(player.getUuidAsString());
+        if (disabled == null) {
+            disabled = CONFIG.playerActionBarDisabled.get(player.getName().getString());
+        }
+        return disabled == null || !disabled.contains(noticeCategoryKey(category));
     }
 
     public static String noticeCategoryKey(NoticeCategory category) {
@@ -139,7 +216,30 @@ public class WardenMod implements ModInitializer {
             case ENCHANTMENT -> "enchantment";
             case EFFECT -> "effect";
             case XP -> "xp";
+            case DIMENSION -> "dimension";
+            case BUCKET -> "bucket";
         };
+    }
+
+    // called from the portal / teleport hooks before the target world does any work
+    public static boolean isDimensionBlocked(Entity entity, RegistryKey<World> dest) {
+        if (!CONFIG.dimensionLimitsEnabled || !CONFIG.blockedDimensionKeys.contains(dest)) {
+            return false;
+        }
+        if (entity instanceof ServerPlayerEntity player) {
+            if (isExempt(player)) {
+                return false;
+            }
+            sendNotice(player, NoticeCategory.DIMENSION, dimensionName(dest) + " is closed on this server");
+        }
+        return true;
+    }
+
+    public static String dimensionName(RegistryKey<World> key) {
+        if (key == World.NETHER) return "The Nether";
+        if (key == World.END) return "The End";
+        if (key == World.OVERWORLD) return "The Overworld";
+        return key.getValue().toString();
     }
 
     public static boolean shouldSkipDurationCap(StatusEffectInstance instance) {
@@ -182,7 +282,7 @@ public class WardenMod implements ModInitializer {
     }
 
     public static void enforceItemLimits(ServerPlayerEntity player) {
-        if (!CONFIG.itemLimitsEnabled || isExempt(player)) {
+        if (!CONFIG.itemLimitsEnabled || CONFIG.itemLimits.isEmpty() || isExempt(player)) {
             return;
         }
 
@@ -225,9 +325,167 @@ public class WardenMod implements ModInitializer {
                 LOGGER.debug("[Warden] Removed {} excess {} from {}", removed, itemId, player.getName().getString());
             }
         }
+
+        if (!CONFIG.itemLimits.containsValue(0)) return;
+
+        // banned items (limit 0) are purged anywhere the player can reach them, not just the hotbar/inventory
+        purgeBanned(player, player.getEnderChestInventory(), "ender chest");
+
+        ScreenHandler handler = player.currentScreenHandler;
+        if (handler != null && handler != player.playerScreenHandler) {
+            boolean changed = false;
+            for (Slot slot : handler.slots) {
+                if (slot.inventory == inv) continue;
+                ItemStack stack = slot.getStack();
+                if (stack.isEmpty()) continue;
+                changed |= stripBanned(player, stack, () -> slot.setStack(ItemStack.EMPTY), "container");
+            }
+            ItemStack cursor = handler.getCursorStack();
+            if (!cursor.isEmpty()) {
+                changed |= stripBanned(player, cursor, () -> handler.setCursorStack(ItemStack.EMPTY), "cursor");
+            }
+            if (changed) {
+                handler.sendContentUpdates();
+            }
+        }
     }
 
-    private static void countItemsRecursive(ItemStack stack, Map<String, Integer> counts) {
+    // ---------------------------------------------------------------- chunk-ban guard
+
+    /** Network-encoded size of a stack, nested contents included. 0 for plain stacks. */
+    public static int itemBytes(ItemStack stack) {
+        DynamicRegistryManager registries = REGISTRIES;
+        if (registries == null || stack == null || stack.isEmpty() || stack.getComponentChanges().isEmpty()) {
+            return 0;
+        }
+        RegistryByteBuf buf = new RegistryByteBuf(Unpooled.buffer(), registries);
+        try {
+            ItemStack.OPTIONAL_PACKET_CODEC.encode(buf, stack);
+            return buf.readableBytes();
+        } catch (RuntimeException e) {
+            // couldn't even encode it; it would kill the client's decoder too
+            return Integer.MAX_VALUE;
+        } finally {
+            buf.release();
+        }
+    }
+
+    public static boolean isOversized(ItemStack stack) {
+        return CONFIG != null && CONFIG.chunkBanEnabled && itemBytes(stack) > CONFIG.maxItemBytes;
+    }
+
+    /** Warn-level log, at most once every 10s per key, so a spammed chunk doesn't flood the console. */
+    public static void logOversized(String key, String message) {
+        long now = System.currentTimeMillis();
+        Long last = LAST_OVERSIZE_LOG.get(key);
+        if (last != null && now - last < 10_000) {
+            return;
+        }
+        LAST_OVERSIZE_LOG.put(key, now);
+        LOGGER.warn("[Warden] chunk-ban guard: {}", message);
+    }
+
+    private static String describeOversized(ItemStack stack) {
+        return shortId(Registries.ITEM.getId(stack.getItem()).toString()) + " (" + (itemBytes(stack) / 1024) + " KB)";
+    }
+
+    public static void enforceChunkBan(ServerPlayerEntity player) {
+        if (!CONFIG.chunkBanEnabled || REGISTRIES == null || isExempt(player)) {
+            return;
+        }
+        String name = player.getName().getString();
+        PlayerInventory inv = player.getInventory();
+        for (int i = 0; i < inv.size(); i++) {
+            ItemStack stack = inv.getStack(i);
+            if (isOversized(stack)) {
+                String what = describeOversized(stack);
+                inv.setStack(i, ItemStack.EMPTY);
+                sendNotice(player, NoticeCategory.ITEM, "removed " + what + " - too much item data");
+                logOversized("inv:" + name, "removed " + what + " from " + name + "'s inventory");
+            }
+        }
+        Inventory ender = player.getEnderChestInventory();
+        for (int i = 0; i < ender.size(); i++) {
+            ItemStack stack = ender.getStack(i);
+            if (isOversized(stack)) {
+                String what = describeOversized(stack);
+                ender.setStack(i, ItemStack.EMPTY);
+                sendNotice(player, NoticeCategory.ITEM, "removed " + what + " - too much item data");
+                logOversized("ender:" + name, "removed " + what + " from " + name + "'s ender chest");
+            }
+        }
+        ScreenHandler handler = player.currentScreenHandler;
+        if (handler != null && handler != player.playerScreenHandler) {
+            boolean changed = purgeOversized(handler, name);
+            ItemStack cursor = handler.getCursorStack();
+            if (isOversized(cursor)) {
+                String what = describeOversized(cursor);
+                handler.setCursorStack(ItemStack.EMPTY);
+                sendNotice(player, NoticeCategory.ITEM, "removed " + what + " - too much item data");
+                changed = true;
+            }
+            if (changed) {
+                handler.sendContentUpdates();
+            }
+        }
+    }
+
+    /** Strips oversized stacks out of every slot of a handler. Also run before the full sync
+     *  goes out, so a chest packed with book-stuffed shulkers can't kick whoever opens it. */
+    public static boolean purgeOversized(ScreenHandler handler, String who) {
+        if (CONFIG == null || !CONFIG.chunkBanEnabled || REGISTRIES == null) {
+            return false;
+        }
+        boolean changed = false;
+        for (Slot slot : handler.slots) {
+            ItemStack stack = slot.getStack();
+            if (isOversized(stack)) {
+                String what = describeOversized(stack);
+                slot.setStack(ItemStack.EMPTY);
+                logOversized("container:" + who, "removed " + what + " from a container opened by " + who);
+                changed = true;
+            }
+        }
+        return changed;
+    }
+
+    public static void sendPickupBlockedNotice(ServerPlayerEntity player, String itemId, int limit) {
+        Integer last = LAST_PICKUP_NOTICE.get(player.getUuid());
+        if (last != null && player.age - last < 40) return;
+        LAST_PICKUP_NOTICE.put(player.getUuid(), player.age);
+        sendNotice(player, NoticeCategory.ITEM, limit == 0
+                ? shortId(itemId) + " is banned"
+                : "can't pick up " + shortId(itemId) + " - at limit (" + limit + ")");
+    }
+
+    private static void purgeBanned(ServerPlayerEntity player, Inventory inv, String where) {
+        for (int i = 0; i < inv.size(); i++) {
+            ItemStack stack = inv.getStack(i);
+            if (stack.isEmpty()) continue;
+            final int slot = i;
+            stripBanned(player, stack, () -> inv.setStack(slot, ItemStack.EMPTY), where);
+        }
+    }
+
+    private static boolean stripBanned(ServerPlayerEntity player, ItemStack stack, Runnable onStackEmpty, String where) {
+        boolean changed = false;
+        Map<String, Integer> counts = new HashMap<>();
+        countItemsRecursive(stack, counts);
+        for (Map.Entry<String, Integer> e : counts.entrySet()) {
+            if (CONFIG.itemLimits.get(e.getKey()) != 0) continue;
+            String itemId = e.getKey();
+            // Removing a banned outer container can also remove other counted items.
+            int count = countItemRecursive(stack, itemId);
+            if (count == 0) continue;
+            removeItemsRecursive(player, stack, itemId, count, onStackEmpty);
+            sendNotice(player, NoticeCategory.ITEM, "removed " + count + "x " + shortId(itemId) + " (banned, " + where + ")");
+            LOGGER.debug("[Warden] Removed {} banned {} from {} ({})", count, itemId, player.getName().getString(), where);
+            changed = true;
+        }
+        return changed;
+    }
+
+    public static void countItemsRecursive(ItemStack stack, Map<String, Integer> counts) {
         if (stack.isEmpty()) return;
 
         String id = Registries.ITEM.getId(stack.getItem()).toString();
@@ -261,7 +519,7 @@ public class WardenMod implements ModInitializer {
         if (bundle != null) {
             List<ItemStack> newContents = new ArrayList<>();
             boolean bundleChanged = false;
-            for (ItemStack inner : bundle.iterate()) {
+            for (ItemStack inner : bundle.iterateCopy()) {
                 if (excess > 0) {
                     int before = excess;
                     // We don't have a good way to "setStackEmpty" inside bundle easily without rebuilding
@@ -294,8 +552,7 @@ public class WardenMod implements ModInitializer {
         // Container (Shulker Box)
         ContainerComponent container = stack.get(DataComponentTypes.CONTAINER);
         if (container != null) {
-            DefaultedList<ItemStack> stacks = DefaultedList.ofSize(27, ItemStack.EMPTY);
-            container.copyTo(stacks);
+            List<ItemStack> stacks = new ArrayList<>(container.stream().toList());
             boolean containerChanged = false;
             for (int i = 0; i < stacks.size(); i++) {
                 ItemStack inner = stacks.get(i);
@@ -339,8 +596,9 @@ public class WardenMod implements ModInitializer {
     }
 
     private static void handleOverflow(ServerPlayerEntity player, ItemStack stack, int amount) {
-        if (CONFIG.deleteOverflowItem) {
-            // Already decremented in caller
+        Integer limit = CONFIG.itemLimits.get(Registries.ITEM.getId(stack.getItem()).toString());
+        if (CONFIG.deleteOverflowItem || (limit != null && limit == 0)) {
+            // Already decremented in caller. Banned items are never dropped back into the world.
         } else {
             ItemStack dropped = stack.copyWithCount(amount);
             ItemEntity itemEntity = player.dropItem(dropped, false);
@@ -370,14 +628,15 @@ public class WardenMod implements ModInitializer {
     }
 
     private static boolean enforceWeaponComponentsRecursive(ItemStack stack) {
+        if (stack.isEmpty()) return false;
         boolean changed = enforceWeaponComponents(stack);
 
         // Bundle
         BundleContentsComponent bundle = stack.get(DataComponentTypes.BUNDLE_CONTENTS);
-        if (bundle != null) {
+        if (bundle != null && contentsNeedUpdate(bundle.iterate(), true)) {
             List<ItemStack> newContents = new ArrayList<>();
             boolean bundleChanged = false;
-            for (ItemStack inner : bundle.iterate()) {
+            for (ItemStack inner : bundle.iterateCopy()) {
                 if (enforceWeaponComponentsRecursive(inner)) {
                     bundleChanged = true;
                 }
@@ -391,9 +650,8 @@ public class WardenMod implements ModInitializer {
 
         // Container
         ContainerComponent container = stack.get(DataComponentTypes.CONTAINER);
-        if (container != null) {
-            DefaultedList<ItemStack> stacks = DefaultedList.ofSize(27, ItemStack.EMPTY);
-            container.copyTo(stacks);
+        if (container != null && contentsNeedUpdate(container.iterateNonEmpty(), true)) {
+            List<ItemStack> stacks = container.stream().toList();
             boolean containerChanged = false;
             for (ItemStack inner : stacks) {
                 if (enforceWeaponComponentsRecursive(inner)) {
@@ -410,34 +668,72 @@ public class WardenMod implements ModInitializer {
     }
 
     public static boolean enforceWeaponComponents(ItemStack stack) {
+        return enforceWeaponComponents(stack, true);
+    }
+
+    private static boolean enforceWeaponComponents(ItemStack stack, boolean apply) {
         if (ENFORCING_WEAPON_COMPONENTS.get()) return false;
         if (CONFIG == null || !CONFIG.weaponLimitsEnabled || stack == null || stack.isEmpty()) {
             return false;
         }
+        WardenConfig.WeaponLimitConfig limit = CONFIG.weaponLimits.isEmpty() ? null
+                : CONFIG.weaponLimits.get(Registries.ITEM.getId(stack.getItem()).toString());
+        ComponentMap defaults = stack.getItem().getComponents();
+        if (limit == null
+                && Objects.equals(stack.get(DataComponentTypes.ATTRIBUTE_MODIFIERS), defaults.get(DataComponentTypes.ATTRIBUTE_MODIFIERS))
+                && Objects.equals(stack.get(DataComponentTypes.ATTACK_RANGE), defaults.get(DataComponentTypes.ATTACK_RANGE))) {
+            return false;
+        }
         ENFORCING_WEAPON_COMPONENTS.set(true);
         try {
-            WardenConfig.WeaponLimitConfig limit = CONFIG.weaponLimits.get(Registries.ITEM.getId(stack.getItem()).toString());
-            ItemStack defaultStack = stack.getItem().getDefaultStack();
             boolean changed = false;
+            changed |= stripForeignAttackModifiers(stack, apply);
             changed |= applyWeaponAttributeLimit(
                     stack,
-                    defaultStack,
+                    defaults,
                     EntityAttributes.ATTACK_DAMAGE,
                     Item.BASE_ATTACK_DAMAGE_MODIFIER_ID,
-                    toAttributeModifierValue("attackDamage", limit != null ? limit.attackDamage : null)
+                    toAttributeModifierValue("attackDamage", limit != null ? limit.attackDamage : null), apply
             );
             changed |= applyWeaponAttributeLimit(
                     stack,
-                    defaultStack,
+                    defaults,
                     EntityAttributes.ATTACK_SPEED,
                     Item.BASE_ATTACK_SPEED_MODIFIER_ID,
-                    toAttributeModifierValue("attackSpeed", limit != null ? limit.attackSpeed : null)
+                    toAttributeModifierValue("attackSpeed", limit != null ? limit.attackSpeed : null), apply
             );
-            changed |= applyWeaponReachLimit(stack, defaultStack, limit != null ? limit.reach : null);
+            changed |= applyWeaponReachLimit(stack, defaults, limit != null ? limit.reach : null, apply);
             return changed;
         } finally {
             ENFORCING_WEAPON_COMPONENTS.set(false);
         }
+    }
+
+    // vanilla only ever carries attack damage/speed under the base modifier ids. anything else
+    // is a /give or hacked-client extra that would stack on top of the cap.
+    private static boolean stripForeignAttackModifiers(ItemStack stack, boolean apply) {
+        AttributeModifiersComponent current = stack.get(DataComponentTypes.ATTRIBUTE_MODIFIERS);
+        if (current == null) {
+            return false;
+        }
+        List<AttributeModifiersComponent.Entry> kept = null;
+        for (int i = 0; i < current.modifiers().size(); i++) {
+            AttributeModifiersComponent.Entry entry = current.modifiers().get(i);
+            boolean attackAttr = entry.attribute().equals(EntityAttributes.ATTACK_DAMAGE)
+                    || entry.attribute().equals(EntityAttributes.ATTACK_SPEED);
+            boolean baseId = entry.modifier().idMatches(Item.BASE_ATTACK_DAMAGE_MODIFIER_ID)
+                    || entry.modifier().idMatches(Item.BASE_ATTACK_SPEED_MODIFIER_ID);
+            if (attackAttr && !baseId) {
+                if (!apply) return true;
+                if (kept == null) kept = new ArrayList<>(current.modifiers().subList(0, i));
+                continue;
+            }
+            if (kept != null) kept.add(entry);
+        }
+        if (kept != null) {
+            stack.set(DataComponentTypes.ATTRIBUTE_MODIFIERS, new AttributeModifiersComponent(kept));
+        }
+        return kept != null;
     }
 
     private static Double toAttributeModifierValue(String stat, Double configuredValue) {
@@ -455,20 +751,35 @@ public class WardenMod implements ModInitializer {
 
     private static boolean applyWeaponAttributeLimit(
             ItemStack stack,
-            ItemStack defaultStack,
+            ComponentMap defaultComponents,
             RegistryEntry<net.minecraft.entity.attribute.EntityAttribute> attribute,
             net.minecraft.util.Identifier modifierId,
-            Double value
+            Double value, boolean apply
     ) {
         AttributeModifiersComponent current = stack.getOrDefault(
                 DataComponentTypes.ATTRIBUTE_MODIFIERS,
                 AttributeModifiersComponent.DEFAULT
         );
-        AttributeModifiersComponent defaults = defaultStack.getOrDefault(
+        AttributeModifiersComponent defaults = defaultComponents.getOrDefault(
                 DataComponentTypes.ATTRIBUTE_MODIFIERS,
                 AttributeModifiersComponent.DEFAULT
         );
         AttributeModifiersComponent.Entry defaultEntry = findWeaponAttributeEntry(defaults, attribute, modifierId);
+        boolean matches = false;
+        boolean needsUpdate = false;
+        for (AttributeModifiersComponent.Entry entry : current.modifiers()) {
+            if (entry.slot() != AttributeModifierSlot.MAINHAND || !entry.attribute().equals(attribute)
+                    || !entry.modifier().idMatches(modifierId)) continue;
+            matches = true;
+            if (value == null ? !entry.equals(defaultEntry)
+                    : entry.modifier().value() != value || entry.modifier().operation() != EntityAttributeModifier.Operation.ADD_VALUE) {
+                needsUpdate = true;
+                break;
+            }
+        }
+        if (!matches && (value != null || defaultEntry != null)) needsUpdate = true;
+        if (!needsUpdate || !apply) return needsUpdate;
+
         List<AttributeModifiersComponent.Entry> entries = new ArrayList<>();
         boolean found = false;
         boolean changed = false;
@@ -539,9 +850,9 @@ public class WardenMod implements ModInitializer {
         return null;
     }
 
-    private static boolean applyWeaponReachLimit(ItemStack stack, ItemStack defaultStack, Float reach) {
+    private static boolean applyWeaponReachLimit(ItemStack stack, ComponentMap defaultComponents, Float reach, boolean apply) {
         AttackRangeComponent current = stack.get(DataComponentTypes.ATTACK_RANGE);
-        AttackRangeComponent defaults = defaultStack.get(DataComponentTypes.ATTACK_RANGE);
+        AttackRangeComponent defaults = defaultComponents.get(DataComponentTypes.ATTACK_RANGE);
         AttackRangeComponent desired;
         if (reach == null) {
             desired = defaults;
@@ -561,6 +872,7 @@ public class WardenMod implements ModInitializer {
         if (Objects.equals(desired, current)) {
             return false;
         }
+        if (!apply) return true;
 
         if (desired == null) {
             stack.remove(DataComponentTypes.ATTACK_RANGE);
@@ -581,7 +893,7 @@ public class WardenMod implements ModInitializer {
     }
 
     public static Float getVanillaReach(Item item) {
-        AttackRangeComponent reach = item.getDefaultStack().get(DataComponentTypes.ATTACK_RANGE);
+        AttackRangeComponent reach = item.getComponents().get(DataComponentTypes.ATTACK_RANGE);
         return reach == null ? null : reach.maxRange();
     }
 
@@ -600,15 +912,16 @@ public class WardenMod implements ModInitializer {
         player.getItemCooldownManager().set(stack, limit.disableCooldownTicks);
     }
 
-    public static boolean isWeaponAttackBlockedByCooldown(ServerPlayerEntity player) {
-        if (CONFIG == null || !CONFIG.weaponLimitsEnabled || player == null || isExempt(player)) {
+    public static boolean isWeaponAttackBlockedByCooldown(PlayerEntity player) {
+        boolean clientSide = player != null && player.getEntityWorld().isClient();
+        if (!areWeaponLimitsEnabled(clientSide) || player == null || (!clientSide && isExempt(player))) {
             return false;
         }
         ItemStack stack = player.getMainHandStack();
         if (stack.isEmpty()) {
             return false;
         }
-        WardenConfig.WeaponLimitConfig limit = getEffectiveWeaponLimit(stack, false);
+        WardenConfig.WeaponLimitConfig limit = getEffectiveWeaponLimit(stack, clientSide);
         if (limit == null || limit.disableCooldownTicks == null || limit.disableCooldownTicks <= 0) {
             return false;
         }
@@ -715,7 +1028,7 @@ public class WardenMod implements ModInitializer {
             RegistryEntry<net.minecraft.entity.attribute.EntityAttribute> attribute,
             net.minecraft.util.Identifier modifierId
     ) {
-        AttributeModifiersComponent defaults = item.getDefaultStack().getOrDefault(
+        AttributeModifiersComponent defaults = item.getComponents().getOrDefault(
                 DataComponentTypes.ATTRIBUTE_MODIFIERS,
                 AttributeModifiersComponent.DEFAULT
         );
@@ -804,16 +1117,17 @@ public class WardenMod implements ModInitializer {
     }
 
     private static boolean enforceEnchantmentLimitsRecursive(ItemStack stack) {
+        if (stack.isEmpty()) return false;
         boolean changed = false;
         changed |= enforceStackEnchantments(stack, DataComponentTypes.ENCHANTMENTS);
         changed |= enforceStackEnchantments(stack, DataComponentTypes.STORED_ENCHANTMENTS);
 
         // Bundle
         BundleContentsComponent bundle = stack.get(DataComponentTypes.BUNDLE_CONTENTS);
-        if (bundle != null) {
+        if (bundle != null && contentsNeedUpdate(bundle.iterate(), false)) {
             List<ItemStack> newContents = new ArrayList<>();
             boolean bundleChanged = false;
-            for (ItemStack inner : bundle.iterate()) {
+            for (ItemStack inner : bundle.iterateCopy()) {
                 if (enforceEnchantmentLimitsRecursive(inner)) {
                     bundleChanged = true;
                 }
@@ -827,9 +1141,8 @@ public class WardenMod implements ModInitializer {
 
         // Container
         ContainerComponent container = stack.get(DataComponentTypes.CONTAINER);
-        if (container != null) {
-            DefaultedList<ItemStack> stacks = DefaultedList.ofSize(27, ItemStack.EMPTY);
-            container.copyTo(stacks);
+        if (container != null && contentsNeedUpdate(container.iterateNonEmpty(), false)) {
+            List<ItemStack> stacks = container.stream().toList();
             boolean containerChanged = false;
             for (ItemStack inner : stacks) {
                 if (enforceEnchantmentLimitsRecursive(inner)) {
@@ -845,13 +1158,43 @@ public class WardenMod implements ModInitializer {
         return changed;
     }
 
+    private static boolean contentsNeedUpdate(Iterable<ItemStack> contents, boolean weapons) {
+        for (ItemStack stack : contents) {
+            if (stack.isEmpty()) continue;
+            if (weapons) {
+                if (enforceWeaponComponents(stack, false)) return true;
+            } else if (capEnchantments(stack, stack.get(DataComponentTypes.ENCHANTMENTS)) != null
+                    || capEnchantments(stack, stack.get(DataComponentTypes.STORED_ENCHANTMENTS)) != null) {
+                return true;
+            }
+            BundleContentsComponent bundle = stack.get(DataComponentTypes.BUNDLE_CONTENTS);
+            if (bundle != null && contentsNeedUpdate(bundle.iterate(), weapons)) return true;
+            ContainerComponent container = stack.get(DataComponentTypes.CONTAINER);
+            if (container != null && contentsNeedUpdate(container.iterateNonEmpty(), weapons)) return true;
+        }
+        return false;
+    }
+
     private static boolean enforceStackEnchantments(
             ItemStack stack,
             net.minecraft.component.ComponentType<ItemEnchantmentsComponent> componentType
     ) {
         ItemEnchantmentsComponent enchants = stack.getOrDefault(componentType, ItemEnchantmentsComponent.DEFAULT);
-        if (enchants.isEmpty()) {
+        ItemEnchantmentsComponent capped = capEnchantments(stack, enchants);
+        if (capped == null) {
             return false;
+        }
+        stack.set(componentType, capped);
+        return true;
+    }
+
+    /** Returns the capped component, or null when nothing was over a limit. */
+    public static ItemEnchantmentsComponent capEnchantments(ItemStack stack, ItemEnchantmentsComponent enchants) {
+        if (CONFIG == null || !CONFIG.enchantmentLimitsEnabled || enchants == null || enchants.isEmpty()) {
+            return null;
+        }
+        if (CONFIG.enchantmentLimits.isEmpty() && CONFIG.itemEnchantmentOverrides.isEmpty()) {
+            return null;
         }
 
         String itemId = Registries.ITEM.getId(stack.getItem()).toString();
@@ -889,11 +1232,7 @@ public class WardenMod implements ModInitializer {
             LOGGER.debug("[Warden] {} on {} capped: {} -> {}", enchId, itemId, current, limit);
         }
 
-        if (builder != null) {
-            stack.set(componentType, builder.build());
-            return true;
-        }
-        return false;
+        return builder == null ? null : builder.build();
     }
 
     public static void enforceEffectLimits(ServerPlayerEntity player) {
@@ -932,7 +1271,8 @@ public class WardenMod implements ModInitializer {
 
             if (newAmplifier != amplifier || newDuration != duration) {
                 player.removeStatusEffect(effectType);
-                player.addStatusEffect(new StatusEffectInstance(effectType, newDuration, newAmplifier));
+                player.addStatusEffect(new StatusEffectInstance(effectType, newDuration, newAmplifier,
+                        instance.isAmbient(), instance.shouldShowParticles(), instance.shouldShowIcon()));
                 sendNotice(player, NoticeCategory.EFFECT, shortId(effectId) + " capped");
                 LOGGER.debug("[Warden] Capped effect {} for {}: level {}->{}, duration {}->{}",
                         effectId, player.getName().getString(), amplifier + 1, newAmplifier + 1, duration, newDuration);

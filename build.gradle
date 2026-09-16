@@ -12,11 +12,8 @@ base {
 }
 
 repositories {
-	// Add repositories to retrieve artifacts from in here.
-	// You should only use this when depending on other mods because
-	// Loom adds the essential maven repositories to download Minecraft and libraries from automatically.
-	// See https://docs.gradle.org/current/userguide/declaring_repositories.html
-	// for more information about repositories.
+	maven { url = "https://maven.isxander.dev/releases" }
+	maven { url = "https://maven.terraformersmc.com/releases" }
 }
 
 loom {
@@ -35,7 +32,9 @@ dependencies {
 
 	// Fabric API. This is technically optional, but you probably want it anyway.
 	modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
-	
+	// bundled so players don't have to install it separately; loader skips it if a newer copy is present
+	modImplementation include("dev.isxander:yet-another-config-lib:${project.yacl_version}")
+	modImplementation "com.terraformersmc:modmenu:${project.modmenu_version}"
 }
 
 processResources {
@@ -60,6 +59,63 @@ java {
 	targetCompatibility = JavaVersion.VERSION_21
 }
 
+sourceSets {
+    performance {
+        compileClasspath += sourceSets.main.output + sourceSets.main.compileClasspath
+        runtimeClasspath += sourceSets.main.output + sourceSets.main.runtimeClasspath
+    }
+}
+
+tasks.register('performanceCheck', JavaExec) {
+    dependsOn performanceClasses
+    classpath = sourceSets.performance.runtimeClasspath
+    mainClass = 'com.warden.PerformanceLauncher'
+    systemProperty 'fabric.development', 'true'
+    systemProperty 'fabric.remapClasspathFile', file('.gradle/loom-cache/remapClasspath.txt').absolutePath
+    systemProperty 'fabric.classPathGroups', sourceSets.main.output.files.join(File.pathSeparator)
+}
+
+check.dependsOn performanceCheck
+
+tasks.register('spawnCheck', JavaExec) {
+    dependsOn performanceClasses
+    classpath = sourceSets.performance.runtimeClasspath
+    mainClass = 'com.warden.SpawnCheckLauncher'
+    systemProperty 'fabric.development', 'true'
+    systemProperty 'fabric.remapClasspathFile', file('.gradle/loom-cache/remapClasspath.txt').absolutePath
+    systemProperty 'fabric.classPathGroups', sourceSets.main.output.files.join(File.pathSeparator)
+    doFirst {
+        def runDir = java.nio.file.Files.createTempDirectory(layout.buildDirectory.get().asFile.toPath(), 'spawn-check-').toFile()
+        workingDir runDir
+        copy {
+            from 'run/eula.txt'
+            into runDir
+        }
+        new File(runDir, 'server.properties').text = '''server-ip=127.0.0.1
+server-port=0
+online-mode=false
+level-type=minecraft:flat
+generator-settings={"layers":[{"block":"minecraft:bedrock","height":1},{"block":"minecraft:dirt","height":2},{"block":"minecraft:grass_block","height":1}],"biome":"minecraft:plains"}
+generate-structures=false
+view-distance=2
+simulation-distance=2
+'''
+    }
+}
+
+tasks.register('spawnRestartCheck', JavaExec) {
+    dependsOn spawnCheck
+    classpath = sourceSets.performance.runtimeClasspath
+    mainClass = 'com.warden.SpawnCheckLauncher'
+    args 'restart'
+    systemProperty 'fabric.development', 'true'
+    systemProperty 'fabric.remapClasspathFile', file('.gradle/loom-cache/remapClasspath.txt').absolutePath
+    systemProperty 'fabric.classPathGroups', sourceSets.main.output.files.join(File.pathSeparator)
+    doFirst {
+        workingDir tasks.spawnCheck.workingDir
+    }
+}
+
 jar {
 	inputs.property "archivesName", project.base.archivesName
 
@@ -79,6 +135,8 @@ modrinth {
 	loaders = ["fabric"]
 	dependencies {
 		required.project "fabric-api"
+		optional.project "yacl"
+		optional.project "modmenu"
 	}
 }
 
