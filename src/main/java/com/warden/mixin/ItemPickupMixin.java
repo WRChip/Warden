@@ -55,7 +55,8 @@ public abstract class ItemPickupMixin {
         Map<String, Integer> held = null;
         for (Map.Entry<String, Integer> e : picked.entrySet()) {
             String id = e.getKey();
-            int limit = WardenMod.CONFIG.itemLimits.get(id);
+            Integer limit = WardenMod.CONFIG.itemLimits.get(id);
+            if (limit == null) continue;
             if (e.getValue() <= limit && held == null) {
                 held = new HashMap<>();
                 for (int i = 0; i < inv.size(); i++) WardenMod.countItemsRecursive(inv.getStack(i), held);

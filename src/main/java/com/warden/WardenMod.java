@@ -301,8 +301,8 @@ public class WardenMod implements ModInitializer {
         for (Map.Entry<String, Integer> entry : counts.entrySet()) {
             String itemId = entry.getKey();
             int total = entry.getValue();
-            int limit = CONFIG.itemLimits.get(itemId);
-            if (total <= limit) {
+            Integer limit = CONFIG.itemLimits.get(itemId);
+            if (limit == null || total <= limit) {
                 continue;
             }
 
@@ -473,7 +473,8 @@ public class WardenMod implements ModInitializer {
         Map<String, Integer> counts = new HashMap<>();
         countItemsRecursive(stack, counts);
         for (Map.Entry<String, Integer> e : counts.entrySet()) {
-            if (CONFIG.itemLimits.get(e.getKey()) != 0) continue;
+            Integer limit = CONFIG.itemLimits.get(e.getKey());
+            if (limit == null || limit != 0) continue;
             String itemId = e.getKey();
             // Removing a banned outer container can also remove other counted items.
             int count = countItemRecursive(stack, itemId);
