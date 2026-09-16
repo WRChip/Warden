@@ -39,6 +39,9 @@ public class WardenConfig {
     public boolean deleteOverflowItem = false;
     public Map<String, Integer> itemLimits = new LinkedHashMap<>();
 
+    public boolean itemUsageEnabled = true;
+    public Set<String> blockedItemUsage = new LinkedHashSet<>();
+
     public boolean weaponLimitsEnabled = true;
     public Map<String, WeaponLimitConfig> weaponLimits = new LinkedHashMap<>();
 
@@ -189,6 +192,10 @@ public class WardenConfig {
                 deleteOverflowItem = false;
                 itemLimits.clear();
             }
+            case "usage" -> {
+                itemUsageEnabled = true;
+                blockedItemUsage.clear();
+            }
             case "weapon" -> {
                 weaponLimitsEnabled = true;
                 weaponLimits.clear();
@@ -252,6 +259,9 @@ public class WardenConfig {
         deleteOverflowItem = false;
         itemLimits.clear();
 
+        itemUsageEnabled = true;
+        blockedItemUsage.clear();
+
         weaponLimitsEnabled = true;
         weaponLimits.clear();
 
@@ -308,6 +318,17 @@ public class WardenConfig {
                 JsonObject itemMap = items.getAsJsonObject("items");
                 for (Map.Entry<String, JsonElement> entry : itemMap.entrySet()) {
                     itemLimits.put(entry.getKey(), entry.getValue().getAsInt());
+                }
+            }
+        }
+
+        if (root.has("item_usage")) {
+            JsonObject usage = root.getAsJsonObject("item_usage");
+            itemUsageEnabled = getBool(usage, "enabled", true);
+            if (usage.has("blocked")) {
+                for (JsonElement item : usage.getAsJsonArray("blocked")) {
+                    Identifier id = Identifier.tryParse(item.getAsString().trim());
+                    if (id != null) blockedItemUsage.add(id.toString());
                 }
             }
         }
@@ -493,6 +514,13 @@ public class WardenConfig {
         }
         itemSection.add("items", itemMap);
         root.add("item_limits", itemSection);
+
+        JsonObject usageSection = new JsonObject();
+        usageSection.addProperty("enabled", itemUsageEnabled);
+        JsonArray usageItems = new JsonArray();
+        blockedItemUsage.forEach(usageItems::add);
+        usageSection.add("blocked", usageItems);
+        root.add("item_usage", usageSection);
 
         JsonObject weaponSection = new JsonObject();
         weaponSection.addProperty("enabled", weaponLimitsEnabled);

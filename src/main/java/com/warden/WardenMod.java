@@ -130,6 +130,7 @@ public class WardenMod implements ModInitializer {
         WardenNewWorldWatcher.register();
         WardenRestore.register();
         WardenModeration.register();
+        WardenItemUsage.register();
     }
 
     private void registerTick() {

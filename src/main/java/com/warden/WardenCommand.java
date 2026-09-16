@@ -51,7 +51,7 @@ public class WardenCommand {
     private static final DynamicCommandExceptionType PLAYER_NOT_FOUND =
             new DynamicCommandExceptionType(name -> wardenPrefix().append(Text.literal("Player not found or offline: " + name).formatted(Formatting.RED)));
     private static final List<String> RESET_CATEGORIES = List.of(
-            "explosion", "item", "weapon", "enchant", "effect", "xp", "dimension", "actionbar", "exempt"
+            "explosion", "item", "usage", "weapon", "enchant", "effect", "xp", "dimension", "actionbar", "exempt"
     );
 
     private static final List<String> EXPLOSION_SOURCES = List.of(
@@ -171,6 +171,7 @@ public class WardenCommand {
         root.then(buildActionBarCommand());
         root.then(buildExplosionCommand());
         root.then(buildItemCommand());
+        root.then(buildUsageCommand());
         root.then(buildWeaponCommand());
         root.then(buildEnchantCommand());
         root.then(buildEffectCommand());
@@ -1059,6 +1060,41 @@ public class WardenCommand {
                 .append(Text.literal(source).formatted(Formatting.YELLOW))
                 .append(Text.literal(had ? " cap disabled (default behavior: no cap)" : " already at default behavior (no cap)").formatted(Formatting.GRAY)), true);
         return 1;
+    }
+
+    private static com.mojang.brigadier.builder.LiteralArgumentBuilder<ServerCommandSource> buildUsageCommand() {
+        var cmd = literal("usage").requires(WardenCommand::hasAdminPermission);
+        cmd.then(literal("list").executes(ctx -> {
+            ctx.getSource().sendFeedback(() -> wardenPrefix().append(Text.literal(
+                    "Item usage " + (WardenMod.CONFIG.itemUsageEnabled ? "enabled" : "disabled")
+                            + ": " + String.join(", ", WardenMod.CONFIG.blockedItemUsage))), false);
+            return 1;
+        }));
+        cmd.then(literal("toggle").then(argument("enabled", BoolArgumentType.bool()).executes(ctx -> {
+            WardenMod.CONFIG.itemUsageEnabled = BoolArgumentType.getBool(ctx, "enabled");
+            WardenMod.CONFIG.save();
+            ctx.getSource().sendFeedback(() -> wardenPrefix().append(Text.literal(
+                    "Item usage restrictions: " + WardenMod.CONFIG.itemUsageEnabled)), true);
+            return 1;
+        })));
+        for (String action : List.of("block", "allow")) {
+            cmd.then(literal(action).then(argument("item", IdentifierArgumentType.identifier())
+                    .suggests((ctx, builder) -> CommandSource.suggestIdentifiers(Registries.ITEM.getIds(), builder))
+                    .executes(ctx -> {
+                        Identifier id = IdentifierArgumentType.getIdentifier(ctx, "item");
+                        if (!Registries.ITEM.containsId(id)) {
+                            ctx.getSource().sendError(Text.literal("Unknown item: " + id));
+                            return 0;
+                        }
+                        if (action.equals("block")) WardenMod.CONFIG.blockedItemUsage.add(id.toString());
+                        else WardenMod.CONFIG.blockedItemUsage.remove(id.toString());
+                        WardenMod.CONFIG.save();
+                        ctx.getSource().sendFeedback(() -> wardenPrefix().append(Text.literal(
+                                id + " usage " + (action.equals("block") ? "blocked (inventory and crafting allowed)" : "allowed"))), true);
+                        return 1;
+                    })));
+        }
+        return cmd;
     }
 
     private static int itemSet(CommandContext<ServerCommandSource> ctx) {
@@ -2262,6 +2298,7 @@ public class WardenCommand {
 
     private static int help(CommandContext<ServerCommandSource> ctx) {
         MutableText response = wardenPrefix().append(Text.literal("Available Commands:").formatted(Formatting.GOLD, Formatting.BOLD));
+        response.append(Text.literal("\n  /warden usage block|allow <item> | list | toggle <true|false>").formatted(Formatting.AQUA));
         
         response.append(Text.literal("\n  /warden ").formatted(Formatting.AQUA))
                 .append(Text.literal("reload | status | help").formatted(Formatting.WHITE));
@@ -2270,7 +2307,7 @@ public class WardenCommand {
                 .append(Text.literal("reset ").formatted(Formatting.WHITE))
                 .append(Text.literal("[<category>]").formatted(Formatting.YELLOW));
         response.append(Text.literal("\n    Categories: ").formatted(Formatting.LIGHT_PURPLE))
-                .append(Text.literal("explosion, item, weapon, enchant, effect, xp, dimension, actionbar, exempt").formatted(Formatting.WHITE));
+                .append(Text.literal("explosion, item, usage, weapon, enchant, effect, xp, dimension, actionbar, exempt").formatted(Formatting.WHITE));
 
         response.append(Text.literal("\n  /warden ").formatted(Formatting.AQUA))
                 .append(Text.literal("restore ").formatted(Formatting.WHITE))

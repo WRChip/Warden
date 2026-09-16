@@ -131,6 +131,7 @@ public final class WardenConfigScreen {
                 : "Read only. Ask an operator to change them.").formatted(canEdit ? Formatting.GREEN : Formatting.GRAY)));
 
         JsonObject items = draft.getAsJsonObject("item_limits");
+        JsonObject usage = draft.has("item_usage") ? draft.getAsJsonObject("item_usage") : null;
         JsonObject effects = draft.getAsJsonObject("effect_limits");
         JsonObject enchants = draft.getAsJsonObject("enchantment_limits");
         JsonObject weapons = draft.getAsJsonObject("weapon_limits");
@@ -144,6 +145,7 @@ public final class WardenConfigScreen {
 
         OptionGroup.Builder general = OptionGroup.createBuilder().name(Text.literal("General"));
         general.option(toggle("Item limits", items, "enabled", canEdit, dirty));
+        if (usage != null) general.option(toggle("Item usage restrictions", usage, "enabled", canEdit, dirty));
         general.option(toggle("Weapon limits", weapons, "enabled", canEdit, dirty));
         general.option(toggle("Enchantment caps", enchants, "enabled", canEdit, dirty));
         general.option(toggle("Effect caps", effects, "enabled", canEdit, dirty));
@@ -229,6 +231,29 @@ public final class WardenConfigScreen {
             weaponGroup.option(LabelOption.create(Text.literal(sb.toString().trim())));
         }
         cat.group(weaponGroup.build());
+
+        if (usage != null) {
+            List<String> blockedItems = new ArrayList<>();
+            usage.getAsJsonArray("blocked").forEach(el -> blockedItems.add(el.getAsString()));
+            cat.group(ListOption.<String>createBuilder()
+                    .name(Text.literal("Blocked item usage"))
+                    .description(OptionDescription.of(Text.literal(
+                            "Item ids whose left and right clicks are blocked. Inventory and crafting remain allowed. "
+                                    + "Remove any item limit of 0 to keep these items. Exempt players can still use them.")))
+                    .binding(List.copyOf(blockedItems), () -> blockedItems, v -> {
+                        blockedItems.clear();
+                        blockedItems.addAll(v);
+                        JsonArray arr = new JsonArray();
+                        v.stream().map(String::trim).filter(s -> !s.isEmpty()).forEach(arr::add);
+                        usage.add("blocked", arr);
+                        dirty[0] = true;
+                    })
+                    .controller(StringControllerBuilder::create)
+                    .initial("")
+                    .available(canEdit)
+                    .collapsed(true)
+                    .build());
+        }
 
         List<String> blockedDims = new ArrayList<>();
         if (dimensions.has("blocked")) {
