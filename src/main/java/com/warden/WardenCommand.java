@@ -54,6 +54,8 @@ public class WardenCommand {
             new DynamicCommandExceptionType(id -> wardenPrefix().append(Text.literal("Unknown explosion source: " + id + " (expected one of " + String.join(", ", WardenCommand.EXPLOSION_SOURCES) + ")").formatted(Formatting.RED)));
     private static final DynamicCommandExceptionType PLAYER_NOT_FOUND =
             new DynamicCommandExceptionType(name -> wardenPrefix().append(Text.literal("Player not found or offline: " + name).formatted(Formatting.RED)));
+    private static final DynamicCommandExceptionType NO_PLAYER_DATA =
+            new DynamicCommandExceptionType(name -> wardenPrefix().append(Text.literal("No saved data for player: " + name).formatted(Formatting.RED)));
     private static final List<String> RESET_CATEGORIES = List.of(
             "explosion", "item", "usage", "weapon", "enchant", "effect", "xp", "dimension", "actionbar", "exempt"
     );
@@ -214,6 +216,45 @@ public class WardenCommand {
         return target;
     }
 
+    // inv/enderchest work on anyone with playerdata on disk, so suggest the offline names too
+    private static java.util.concurrent.CompletableFuture<com.mojang.brigadier.suggestion.Suggestions> suggestKnownPlayers(
+            CommandContext<ServerCommandSource> ctx,
+            com.mojang.brigadier.suggestion.SuggestionsBuilder builder
+    ) {
+        MinecraftServer server = ctx.getSource().getServer();
+        Set<String> names = new LinkedHashSet<>(List.of(server.getPlayerManager().getPlayerNames()));
+        try (var files = java.nio.file.Files.list(server.getSavePath(net.minecraft.util.WorldSavePath.PLAYERDATA))) {
+            files.map(path -> path.getFileName().toString())
+                    .filter(file -> file.endsWith(".dat"))
+                    .forEach(file -> parseUuid(file.substring(0, file.length() - 4))
+                            .flatMap(id -> server.getApiServices().nameToIdCache().getByUuid(id))
+                            .ifPresent(entry -> names.add(entry.name())));
+        } catch (java.io.IOException e) {
+            WardenMod.LOGGER.warn("[Warden] could not list playerdata for suggestions", e);
+        }
+        return CommandSource.suggestMatching(names, builder);
+    }
+
+    private static java.util.Optional<UUID> parseUuid(String value) {
+        try {
+            return java.util.Optional.of(UUID.fromString(value));
+        } catch (IllegalArgumentException e) {
+            return java.util.Optional.empty();
+        }
+    }
+
+    private static net.minecraft.server.PlayerConfigEntry resolvePlayerProfile(CommandContext<ServerCommandSource> ctx, String argName)
+            throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        String name = StringArgumentType.getString(ctx, argName);
+        MinecraftServer server = ctx.getSource().getServer();
+        ServerPlayerEntity online = server.getPlayerManager().getPlayer(name);
+        if (online != null) {
+            return new net.minecraft.server.PlayerConfigEntry(online.getGameProfile());
+        }
+        return server.getApiServices().nameToIdCache().findByName(name)
+                .orElseThrow(() -> NO_PLAYER_DATA.create(name));
+    }
+
     private static com.mojang.brigadier.builder.LiteralArgumentBuilder<ServerCommandSource> buildFreezeCommand() {
         return literal("freeze").requires(WardenCommand::hasAdminPermission)
                 .then(argument("player", StringArgumentType.word())
@@ -231,14 +272,14 @@ public class WardenCommand {
     private static com.mojang.brigadier.builder.LiteralArgumentBuilder<ServerCommandSource> buildInventoryCommand() {
         return literal("inv").requires(WardenCommand::hasAdminPermission)
                 .then(argument("player", StringArgumentType.word())
-                        .suggests(WardenCommand::suggestOnlinePlayers)
+                        .suggests(WardenCommand::suggestKnownPlayers)
                         .executes(WardenCommand::openInventory));
     }
 
     private static com.mojang.brigadier.builder.LiteralArgumentBuilder<ServerCommandSource> buildEnderChestCommand() {
         return literal("enderchest").requires(WardenCommand::hasAdminPermission)
                 .then(argument("player", StringArgumentType.word())
-                        .suggests(WardenCommand::suggestOnlinePlayers)
+                        .suggests(WardenCommand::suggestKnownPlayers)
                         .executes(WardenCommand::openEnderChest));
     }
 
@@ -266,15 +307,19 @@ public class WardenCommand {
 
     private static int openInventory(CommandContext<ServerCommandSource> ctx) throws com.mojang.brigadier.exceptions.CommandSyntaxException {
         ServerPlayerEntity moderator = ctx.getSource().getPlayerOrThrow();
-        ServerPlayerEntity target = resolveOnlinePlayer(ctx, "player");
-        WardenModeration.openInventoryView(moderator, target);
+        net.minecraft.server.PlayerConfigEntry profile = resolvePlayerProfile(ctx, "player");
+        if (!WardenModeration.openInventoryView(ctx.getSource().getServer(), moderator, profile)) {
+            throw NO_PLAYER_DATA.create(profile.name());
+        }
         return 1;
     }
 
     private static int openEnderChest(CommandContext<ServerCommandSource> ctx) throws com.mojang.brigadier.exceptions.CommandSyntaxException {
         ServerPlayerEntity moderator = ctx.getSource().getPlayerOrThrow();
-        ServerPlayerEntity target = resolveOnlinePlayer(ctx, "player");
-        WardenModeration.openEnderChestView(moderator, target);
+        net.minecraft.server.PlayerConfigEntry profile = resolvePlayerProfile(ctx, "player");
+        if (!WardenModeration.openEnderChestView(ctx.getSource().getServer(), moderator, profile)) {
+            throw NO_PLAYER_DATA.create(profile.name());
+        }
         return 1;
     }
 
