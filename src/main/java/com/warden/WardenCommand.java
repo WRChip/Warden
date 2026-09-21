@@ -57,7 +57,7 @@ public class WardenCommand {
     private static final DynamicCommandExceptionType NO_PLAYER_DATA =
             new DynamicCommandExceptionType(name -> wardenPrefix().append(Text.literal("No saved data for player: " + name).formatted(Formatting.RED)));
     private static final List<String> RESET_CATEGORIES = List.of(
-            "explosion", "item", "usage", "weapon", "enchant", "effect", "xp", "dimension", "actionbar", "exempt"
+            "explosion", "item", "globalitem", "usage", "weapon", "enchant", "effect", "xp", "dimension", "actionbar", "exempt"
     );
 
     private static final List<String> EXPLOSION_SOURCES = List.of(
@@ -183,6 +183,7 @@ public class WardenCommand {
         root.then(buildActionBarCommand());
         root.then(buildExplosionCommand());
         root.then(buildItemCommand());
+        root.then(buildGlobalItemCommand());
         root.then(buildUsageCommand());
         root.then(buildWeaponCommand());
         root.then(buildEnchantCommand());
@@ -417,6 +418,95 @@ public class WardenCommand {
         return item;
     }
 
+    private static com.mojang.brigadier.builder.LiteralArgumentBuilder<ServerCommandSource> buildGlobalItemCommand() {
+        var global = literal("globalitem").requires(WardenCommand::hasAdminPermission);
+        var status = literal("status").executes(WardenCommand::statusGlobalItemAll);
+        status.then(argument("item", IdentifierArgumentType.identifier())
+                .suggests((ctx, builder) -> CommandSource.suggestMatching(WardenMod.CONFIG.globalItemLimits.keySet(), builder))
+                .executes(WardenCommand::statusGlobalItem));
+        global.then(status);
+        global.then(literal("set")
+                .then(argument("item", IdentifierArgumentType.identifier())
+                        .suggests((ctx, builder) -> CommandSource.suggestIdentifiers(Registries.ITEM.getIds(), builder))
+                        .then(literal("maxCount")
+                                .then(argument("value", IntegerArgumentType.integer(0)).executes(WardenCommand::globalItemSet))
+                                .then(literal("default").executes(WardenCommand::globalItemRemove)))));
+        global.then(literal("remove")
+                .then(argument("item", IdentifierArgumentType.identifier())
+                        .suggests((ctx, builder) -> CommandSource.suggestMatching(WardenMod.CONFIG.globalItemLimits.keySet(), builder))
+                        .executes(WardenCommand::globalItemRemove)));
+        return global;
+    }
+
+    private static int statusGlobalItemAll(CommandContext<ServerCommandSource> ctx) {
+        WardenConfig cfg = WardenMod.CONFIG;
+        MutableText response = wardenPrefix().append(Text.literal("Server-wide item limits (").formatted(Formatting.GRAY))
+                .append(Text.literal(cfg.globalItemLimitsEnabled ? "ENABLED" : "DISABLED")
+                        .formatted(cfg.globalItemLimitsEnabled ? Formatting.GREEN : Formatting.RED))
+                .append(Text.literal("):").formatted(Formatting.GRAY));
+
+        if (cfg.globalItemLimits.isEmpty()) {
+            response.append(Text.literal("\n  (none configured)").formatted(Formatting.DARK_GRAY));
+        } else {
+            Map<String, Integer> counts = WardenGlobalLimits.census(ctx.getSource().getServer());
+            for (var e : cfg.globalItemLimits.entrySet()) {
+                response.append(Text.literal("\n  ").formatted(Formatting.GRAY))
+                        .append(Text.literal(e.getKey()).formatted(Formatting.YELLOW))
+                        .append(Text.literal(": ").formatted(Formatting.GRAY))
+                        .append(Text.literal(String.valueOf(counts.getOrDefault(e.getKey(), 0))).formatted(Formatting.AQUA))
+                        .append(Text.literal(" / maxCount=").formatted(Formatting.GRAY))
+                        .append(Text.literal(String.valueOf(e.getValue())).formatted(Formatting.AQUA));
+            }
+        }
+        ctx.getSource().sendFeedback(() -> response, false);
+        return 1;
+    }
+
+    private static int statusGlobalItem(CommandContext<ServerCommandSource> ctx) {
+        String item = IdentifierArgumentType.getIdentifier(ctx, "item").toString();
+        Integer limit = WardenMod.CONFIG.globalItemLimits.get(item);
+        if (limit == null) {
+            ctx.getSource().sendFeedback(() -> wardenPrefix()
+                    .append(Text.literal("globalitem.").formatted(Formatting.GRAY))
+                    .append(Text.literal(item).formatted(Formatting.YELLOW))
+                    .append(Text.literal(": not configured").formatted(Formatting.RED)), false);
+            return 1;
+        }
+        int on = WardenGlobalLimits.census(ctx.getSource().getServer()).getOrDefault(item, 0);
+        ctx.getSource().sendFeedback(() -> wardenPrefix()
+                .append(Text.literal("globalitem.").formatted(Formatting.GRAY))
+                .append(Text.literal(item).formatted(Formatting.YELLOW))
+                .append(Text.literal(": ").formatted(Formatting.GRAY))
+                .append(Text.literal(on + " / " + limit).formatted(Formatting.AQUA))
+                .append(Text.literal(" on the server").formatted(Formatting.GRAY)), false);
+        return 1;
+    }
+
+    private static int globalItemSet(CommandContext<ServerCommandSource> ctx) throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        String item = IdentifierArgumentType.getIdentifier(ctx, "item").toString();
+        if (getItem(item) == null) throw UNKNOWN_ITEM.create(item);
+        int value = IntegerArgumentType.getInteger(ctx, "value");
+        WardenMod.CONFIG.globalItemLimits.put(item, value);
+        WardenMod.CONFIG.save();
+        ctx.getSource().sendFeedback(() -> wardenPrefix()
+                .append(Text.literal("globalitem.").formatted(Formatting.GRAY))
+                .append(Text.literal(item).formatted(Formatting.YELLOW))
+                .append(Text.literal(" maxCount = ").formatted(Formatting.GRAY))
+                .append(Text.literal(value + " server-wide").formatted(Formatting.AQUA)), true);
+        return 1;
+    }
+
+    private static int globalItemRemove(CommandContext<ServerCommandSource> ctx) {
+        String itemId = IdentifierArgumentType.getIdentifier(ctx, "item").toString();
+        boolean had = WardenMod.CONFIG.globalItemLimits.remove(itemId) != null;
+        WardenMod.CONFIG.save();
+        ctx.getSource().sendFeedback(() -> wardenPrefix()
+                .append(Text.literal("globalitem.").formatted(Formatting.GRAY))
+                .append(Text.literal(itemId).formatted(Formatting.YELLOW))
+                .append(Text.literal(had ? " cap disabled (default: no cap)" : " already at default behavior (no cap)").formatted(Formatting.GRAY)), true);
+        return 1;
+    }
+
     private static com.mojang.brigadier.builder.LiteralArgumentBuilder<ServerCommandSource> buildWeaponCommand() {
         var weapon = literal("weapon").requires(WardenCommand::hasAdminPermission);
         var status = literal("status").executes(WardenCommand::statusWeaponAll);
@@ -645,6 +735,9 @@ public class WardenCommand {
         config.then(literal("itemLimitsEnabled")
                 .executes(ctx -> configShow(ctx, "itemLimitsEnabled", String.valueOf(WardenMod.CONFIG.itemLimitsEnabled)))
                 .then(argument("value", BoolArgumentType.bool()).executes(WardenCommand::configItemLimitsEnabled)));
+        config.then(literal("globalItemLimitsEnabled")
+                .executes(ctx -> configShow(ctx, "globalItemLimitsEnabled", String.valueOf(WardenMod.CONFIG.globalItemLimitsEnabled)))
+                .then(argument("value", BoolArgumentType.bool()).executes(ctx -> configSetBool(ctx, "globalItemLimitsEnabled", v -> WardenMod.CONFIG.globalItemLimitsEnabled = v))));
         config.then(literal("explosionLimitsEnabled")
                 .executes(ctx -> configShow(ctx, "explosionLimitsEnabled", String.valueOf(WardenMod.CONFIG.explosionLimitsEnabled)))
                 .then(argument("value", BoolArgumentType.bool()).executes(WardenCommand::configExplosionLimitsEnabled)));
@@ -802,6 +895,8 @@ public class WardenCommand {
                 .append(Text.literal(cfg.explosionLimitsEnabled ? "ENABLED" : "DISABLED").formatted(cfg.explosionLimitsEnabled ? Formatting.GREEN : Formatting.RED));
         response.append(Text.literal("\n  item limits: ").formatted(Formatting.GRAY))
                 .append(Text.literal(cfg.itemLimitsEnabled ? "ENABLED" : "DISABLED").formatted(cfg.itemLimitsEnabled ? Formatting.GREEN : Formatting.RED));
+        response.append(Text.literal("\n  server-wide item limits: ").formatted(Formatting.GRAY))
+                .append(Text.literal(cfg.globalItemLimitsEnabled ? "ENABLED" : "DISABLED").formatted(cfg.globalItemLimitsEnabled ? Formatting.GREEN : Formatting.RED));
         response.append(Text.literal("\n  weapon limits: ").formatted(Formatting.GRAY))
                 .append(Text.literal(cfg.weaponLimitsEnabled ? "ENABLED" : "DISABLED").formatted(cfg.weaponLimitsEnabled ? Formatting.GREEN : Formatting.RED));
         response.append(Text.literal("\n  enchantment limits: ").formatted(Formatting.GRAY))
@@ -2023,6 +2118,8 @@ public class WardenCommand {
         MutableText response = wardenPrefix().append(Text.literal("Config:").formatted(Formatting.GOLD));
         response.append(Text.literal("\n  itemLimitsEnabled = ").formatted(Formatting.GRAY))
                 .append(Text.literal(String.valueOf(cfg.itemLimitsEnabled)).formatted(cfg.itemLimitsEnabled ? Formatting.GREEN : Formatting.RED));
+        response.append(Text.literal("\n  globalItemLimitsEnabled = ").formatted(Formatting.GRAY))
+                .append(Text.literal(String.valueOf(cfg.globalItemLimitsEnabled)).formatted(cfg.globalItemLimitsEnabled ? Formatting.GREEN : Formatting.RED));
         response.append(Text.literal("\n  explosionLimitsEnabled = ").formatted(Formatting.GRAY))
                 .append(Text.literal(String.valueOf(cfg.explosionLimitsEnabled)).formatted(cfg.explosionLimitsEnabled ? Formatting.GREEN : Formatting.RED));
         response.append(Text.literal("\n  weaponLimitsEnabled = ").formatted(Formatting.GRAY))
@@ -2373,7 +2470,7 @@ public class WardenCommand {
                 .append(Text.literal("reset ").formatted(Formatting.WHITE))
                 .append(Text.literal("[<category>]").formatted(Formatting.YELLOW));
         response.append(Text.literal("\n    Categories: ").formatted(Formatting.LIGHT_PURPLE))
-                .append(Text.literal("explosion, item, usage, weapon, enchant, effect, xp, dimension, actionbar, exempt").formatted(Formatting.WHITE));
+                .append(Text.literal("explosion, item, globalitem, usage, weapon, enchant, effect, xp, dimension, actionbar, exempt").formatted(Formatting.WHITE));
 
         response.append(Text.literal("\n  /warden ").formatted(Formatting.AQUA))
                 .append(Text.literal("restore ").formatted(Formatting.WHITE))
@@ -2403,6 +2500,20 @@ public class WardenCommand {
         response.append(Text.literal("\n  /warden ").formatted(Formatting.AQUA))
                 .append(Text.literal("item ").formatted(Formatting.WHITE))
                 .append(Text.literal("disable/remove ").formatted(Formatting.RED))
+                .append(Text.literal("<item>").formatted(Formatting.YELLOW));
+
+        response.append(Text.literal("\n  /warden ").formatted(Formatting.AQUA))
+                .append(Text.literal("globalitem ").formatted(Formatting.WHITE))
+                .append(Text.literal("status ").formatted(Formatting.GREEN))
+                .append(Text.literal("[<item>]").formatted(Formatting.YELLOW));
+        response.append(Text.literal("\n  /warden ").formatted(Formatting.AQUA))
+                .append(Text.literal("globalitem ").formatted(Formatting.WHITE))
+                .append(Text.literal("set ").formatted(Formatting.GREEN))
+                .append(Text.literal("<item> maxCount <value|default>").formatted(Formatting.YELLOW))
+                .append(Text.literal("  (cap for the whole server)").formatted(Formatting.DARK_GRAY));
+        response.append(Text.literal("\n  /warden ").formatted(Formatting.AQUA))
+                .append(Text.literal("globalitem ").formatted(Formatting.WHITE))
+                .append(Text.literal("remove ").formatted(Formatting.RED))
                 .append(Text.literal("<item>").formatted(Formatting.YELLOW));
 
         response.append(Text.literal("\n  /warden ").formatted(Formatting.AQUA))

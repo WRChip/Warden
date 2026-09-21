@@ -40,6 +40,9 @@ public class WardenConfig {
     public boolean deleteOverflowItem = false;
     public Map<String, Integer> itemLimits = new LinkedHashMap<>();
 
+    public boolean globalItemLimitsEnabled = true;
+    public Map<String, Integer> globalItemLimits = new LinkedHashMap<>();
+
     public boolean itemUsageEnabled = true;
     public Set<String> blockedItemUsage = new LinkedHashSet<>();
 
@@ -200,6 +203,10 @@ public class WardenConfig {
                 deleteOverflowItem = false;
                 itemLimits.clear();
             }
+            case "globalitem" -> {
+                globalItemLimitsEnabled = true;
+                globalItemLimits.clear();
+            }
             case "usage" -> {
                 itemUsageEnabled = true;
                 blockedItemUsage.clear();
@@ -263,6 +270,9 @@ public class WardenConfig {
         deleteOverflowItem = false;
         itemLimits.clear();
 
+        globalItemLimitsEnabled = true;
+        globalItemLimits.clear();
+
         itemUsageEnabled = true;
         blockedItemUsage.clear();
 
@@ -321,6 +331,17 @@ public class WardenConfig {
                 for (Map.Entry<String, JsonElement> entry : itemMap.entrySet()) {
                     String id = canonicalId(entry.getKey(), "item_limits");
                     if (id != null) itemLimits.put(id, entry.getValue().getAsInt());
+                }
+            }
+        }
+
+        if (root.has("global_item_limits")) {
+            JsonObject global = root.getAsJsonObject("global_item_limits");
+            globalItemLimitsEnabled = getBool(global, "enabled", true);
+            if (global.has("items")) {
+                for (Map.Entry<String, JsonElement> entry : global.getAsJsonObject("items").entrySet()) {
+                    String id = canonicalId(entry.getKey(), "global_item_limits");
+                    if (id != null) globalItemLimits.put(id, entry.getValue().getAsInt());
                 }
             }
         }
@@ -516,6 +537,15 @@ public class WardenConfig {
         }
         itemSection.add("items", itemMap);
         root.add("item_limits", itemSection);
+
+        JsonObject globalSection = new JsonObject();
+        globalSection.addProperty("enabled", globalItemLimitsEnabled);
+        JsonObject globalMap = new JsonObject();
+        for (Map.Entry<String, Integer> e : globalItemLimits.entrySet()) {
+            globalMap.addProperty(e.getKey(), e.getValue());
+        }
+        globalSection.add("items", globalMap);
+        root.add("global_item_limits", globalSection);
 
         JsonObject usageSection = new JsonObject();
         usageSection.addProperty("enabled", itemUsageEnabled);

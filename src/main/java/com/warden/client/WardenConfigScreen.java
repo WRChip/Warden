@@ -130,6 +130,7 @@ public final class WardenConfigScreen {
                 : "Read only. Ask an operator to change them.").formatted(canEdit ? Formatting.GREEN : Formatting.GRAY)));
 
         JsonObject items = draft.getAsJsonObject("item_limits");
+        JsonObject globalItems = draft.has("global_item_limits") ? draft.getAsJsonObject("global_item_limits") : null;
         JsonObject usage = draft.has("item_usage") ? draft.getAsJsonObject("item_usage") : null;
         JsonObject effects = draft.getAsJsonObject("effect_limits");
         JsonObject enchants = draft.getAsJsonObject("enchantment_limits");
@@ -143,6 +144,7 @@ public final class WardenConfigScreen {
 
         OptionGroup.Builder general = OptionGroup.createBuilder().name(Text.literal("General"));
         general.option(toggle("Item limits", items, "enabled", canEdit, dirty));
+        if (globalItems != null) general.option(toggle("Server-wide item limits", globalItems, "enabled", canEdit, dirty));
         if (usage != null) general.option(toggle("Item usage restrictions", usage, "enabled", canEdit, dirty));
         general.option(toggle("Weapon limits", weapons, "enabled", canEdit, dirty));
         general.option(toggle("Enchantment caps", enchants, "enabled", canEdit, dirty));
@@ -168,6 +170,15 @@ public final class WardenConfigScreen {
                 items, "items", true, canEdit, dirty, rejected,
                 (id, el) -> id + " = " + el.getAsInt(),
                 (map, id, value) -> map.addProperty(id, Integer.parseInt(value))));
+
+        if (globalItems != null) {
+            cat.group(mapList("Server-wide item limits",
+                    "One per line: item id = max count across the whole server. Counts dropped items and "
+                            + "what players carry, nested containers included. 0 keeps the item off the server entirely.",
+                    globalItems, "items", true, canEdit, dirty, rejected,
+                    (id, el) -> id + " = " + el.getAsInt(),
+                    (map, id, value) -> map.addProperty(id, Integer.parseInt(value))));
+        }
 
         cat.group(mapList("Effect caps",
                 "One per line: effect id = max level / max ticks. 0 for either blocks the effect, -1 means no cap.",

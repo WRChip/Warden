@@ -51,6 +51,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -133,6 +134,7 @@ public class WardenMod implements ModInitializer {
             if (server.getTicks() % Math.max(1, CONFIG.checkIntervalTicks) != 0) {
                 return;
             }
+            WardenGlobalLimits.sweep(server);
             for (ServerPlayerEntity player : server.getPlayerManager().getPlayerList()) {
                 enforceChunkBan(player);
                 enforceItemLimits(player);
@@ -233,7 +235,7 @@ public class WardenMod implements ModInitializer {
         return instance.isAmbient();
     }
 
-    public static int countItemsInInventory(PlayerInventory inv, String itemId) {
+    public static int countItemsInInventory(Inventory inv, String itemId) {
         int total = 0;
         for (int i = 0; i < inv.size(); i++) {
             ItemStack stack = inv.getStack(i);
@@ -243,7 +245,7 @@ public class WardenMod implements ModInitializer {
         return total;
     }
 
-    private static int countItemRecursive(ItemStack stack, String itemId) {
+    public static int countItemRecursive(ItemStack stack, String itemId) {
         if (stack.isEmpty()) return 0;
         int count = 0;
         if (Registries.ITEM.getId(stack.getItem()).toString().equals(itemId)) {
@@ -336,6 +338,50 @@ public class WardenMod implements ModInitializer {
                 handler.sendContentUpdates();
             }
         }
+    }
+
+    /** Everything a player is carrying: inventory, ender chest and the stack on their cursor. */
+    public static int countCarried(ServerPlayerEntity player, String itemId) {
+        int total = countItemsInInventory(player.getInventory(), itemId)
+                + countItemsInInventory(player.getEnderChestInventory(), itemId);
+        ScreenHandler handler = player.currentScreenHandler;
+        if (handler != null) {
+            total += countItemRecursive(handler.getCursorStack(), itemId);
+        }
+        return total;
+    }
+
+    /** Deletes up to {@code amount} of an item from a loose stack, nested containers included.
+     *  No player involved - deletion never drops anything back. Returns how many went. */
+    public static int deleteFromStack(ItemStack stack, String itemId, int amount) {
+        return amount - removeItemsRecursive(null, stack, itemId, amount, () -> {}, true);
+    }
+
+    /** Deletes up to {@code amount} of an item from everything the player is carrying,
+     *  outright - a global cap can't be met by dropping the overflow. Returns how many went. */
+    public static int deleteCarried(ServerPlayerEntity player, String itemId, int amount) {
+        int excess = amount;
+        PlayerInventory inv = player.getInventory();
+        for (int i = inv.size() - 1; i >= 0 && excess > 0; i--) {
+            ItemStack stack = inv.getStack(i);
+            if (stack.isEmpty()) continue;
+            final int slot = i;
+            excess = removeItemsRecursive(player, stack, itemId, excess, () -> inv.setStack(slot, ItemStack.EMPTY), true);
+        }
+        Inventory ender = player.getEnderChestInventory();
+        for (int i = ender.size() - 1; i >= 0 && excess > 0; i--) {
+            ItemStack stack = ender.getStack(i);
+            if (stack.isEmpty()) continue;
+            final int slot = i;
+            excess = removeItemsRecursive(player, stack, itemId, excess, () -> ender.setStack(slot, ItemStack.EMPTY), true);
+        }
+        ScreenHandler handler = player.currentScreenHandler;
+        if (handler != null && excess > 0 && !handler.getCursorStack().isEmpty()) {
+            excess = removeItemsRecursive(player, handler.getCursorStack(), itemId, excess,
+                    () -> handler.setCursorStack(ItemStack.EMPTY), true);
+            handler.sendContentUpdates();
+        }
+        return amount - excess;
     }
 
     // ---------------------------------------------------------------- chunk-ban guard
@@ -479,10 +525,14 @@ public class WardenMod implements ModInitializer {
     }
 
     public static void countItemsRecursive(ItemStack stack, Map<String, Integer> counts) {
+        countTracked(stack, counts, CONFIG.itemLimits.keySet());
+    }
+
+    public static void countTracked(ItemStack stack, Map<String, Integer> counts, Set<String> tracked) {
         if (stack.isEmpty()) return;
 
         String id = Registries.ITEM.getId(stack.getItem()).toString();
-        if (CONFIG.itemLimits.containsKey(id)) {
+        if (tracked.contains(id)) {
             counts.merge(id, stack.getCount(), Integer::sum);
         }
 
@@ -490,7 +540,7 @@ public class WardenMod implements ModInitializer {
         BundleContentsComponent bundle = stack.get(DataComponentTypes.BUNDLE_CONTENTS);
         if (bundle != null) {
             for (ItemStack inner : bundle.iterate()) {
-                countItemsRecursive(inner, counts);
+                countTracked(inner, counts, tracked);
             }
         }
 
@@ -498,12 +548,17 @@ public class WardenMod implements ModInitializer {
         ContainerComponent container = stack.get(DataComponentTypes.CONTAINER);
         if (container != null) {
             for (ItemStack inner : container.iterateNonEmpty()) {
-                countItemsRecursive(inner, counts);
+                countTracked(inner, counts, tracked);
             }
         }
     }
 
     private static int removeItemsRecursive(ServerPlayerEntity player, ItemStack stack, String itemId, int excess, Runnable onStackEmpty) {
+        return removeItemsRecursive(player, stack, itemId, excess, onStackEmpty, false);
+    }
+
+    private static int removeItemsRecursive(ServerPlayerEntity player, ItemStack stack, String itemId, int excess,
+                                            Runnable onStackEmpty, boolean delete) {
         if (stack.isEmpty() || excess <= 0) return excess;
 
         // Check contents first (deepest first)
@@ -520,7 +575,7 @@ public class WardenMod implements ModInitializer {
                     // For bundle, we handle it specially
                     if (Registries.ITEM.getId(inner.getItem()).toString().equals(itemId)) {
                         int drop = Math.min(inner.getCount(), excess);
-                        handleOverflow(player, inner, drop);
+                        handleOverflow(player, inner, drop, delete);
                         inner.decrement(drop);
                         excess -= drop;
                         bundleChanged = true;
@@ -529,7 +584,7 @@ public class WardenMod implements ModInitializer {
                     // Recursively check inner containers if any
                     excess = removeItemsRecursive(player, inner, itemId, excess, () -> {
                         // inner is now empty, handled by inner.decrement above or recursive call
-                    });
+                    }, delete);
 
                     if (before != excess) bundleChanged = true;
                 }
@@ -555,11 +610,11 @@ public class WardenMod implements ModInitializer {
                 final int idx = i;
                 excess = removeItemsRecursive(player, inner, itemId, excess, () -> {
                     stacks.set(idx, ItemStack.EMPTY);
-                });
+                }, delete);
 
                 if (Registries.ITEM.getId(inner.getItem()).toString().equals(itemId) && excess > 0) {
                     int drop = Math.min(inner.getCount(), excess);
-                    handleOverflow(player, inner, drop);
+                    handleOverflow(player, inner, drop, delete);
                     inner.decrement(drop);
                     if (inner.isEmpty()) {
                         stacks.set(i, ItemStack.EMPTY);
@@ -577,7 +632,7 @@ public class WardenMod implements ModInitializer {
         // Finally check the stack itself
         if (excess > 0 && Registries.ITEM.getId(stack.getItem()).toString().equals(itemId)) {
             int drop = Math.min(stack.getCount(), excess);
-            handleOverflow(player, stack, drop);
+            handleOverflow(player, stack, drop, delete);
             stack.decrement(drop);
             if (stack.isEmpty()) {
                 onStackEmpty.run();
@@ -588,9 +643,10 @@ public class WardenMod implements ModInitializer {
         return excess;
     }
 
-    private static void handleOverflow(ServerPlayerEntity player, ItemStack stack, int amount) {
+    // player is only needed to drop the overflow; with delete set it may be null
+    private static void handleOverflow(ServerPlayerEntity player, ItemStack stack, int amount, boolean delete) {
         Integer limit = CONFIG.itemLimits.get(Registries.ITEM.getId(stack.getItem()).toString());
-        if (CONFIG.deleteOverflowItem || (limit != null && limit == 0)) {
+        if (delete || CONFIG.deleteOverflowItem || (limit != null && limit == 0)) {
             // Already decremented in caller. Banned items are never dropped back into the world.
         } else {
             ItemStack dropped = stack.copyWithCount(amount);
